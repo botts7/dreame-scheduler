@@ -1,12 +1,44 @@
-# Dreame Scheduler
+<p align="center">
+  <img src="images/banner.png" alt="Dreame Scheduler" width="720">
+</p>
 
-Presence-aware, per-room cleaning scheduler for **any** Dreame robot vacuum
-exposed through the [Tasshack `dreame_vacuum`](https://github.com/Tasshack/dreame-vacuum)
-integration. A meta-integration: it doesn't talk to the robot directly — it
-orchestrates the entities `dreame_vacuum` already provides, so it works with any
-model and needs no rooting.
+<p align="center">
+  <strong>Presence-aware, per-room cleaning scheduler for any Dreame robot vacuum in Home Assistant.</strong>
+</p>
 
-> One config entry per robot. Add it again for a second vacuum.
+<p align="center">
+  <img src="https://img.shields.io/badge/HACS-Custom-41BDF5" alt="HACS">
+  <img src="https://img.shields.io/badge/version-0.1.0-blue" alt="version">
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
+</p>
+
+Schedule cleaning per room and per weekday, only when nobody's home, with a
+weekly whole-house guarantee — all driven by the entities the
+[Tasshack `dreame_vacuum`](https://github.com/Tasshack/dreame-vacuum) integration
+already exposes. A meta-integration: it works with any model and needs no
+rooting. One config entry per robot; add it again for a second vacuum.
+
+## Highlights
+
+| 🏠 Cleans when you're out | 📊 Tells you what happened | 🛟 Frees a stuck robot |
+|---|---|---|
+| Gates on your presence entities with a grace delay, and steps aside to the dock the moment someone comes home — resuming once the house is empty again. | A weekly report of what got cleaned, what was missed and _why_ — with the robot's own coverage renders, flagged obstacles, and a run-history trend. | If it wedges mid-clean, the scheduler walls off the spot, backs it out, and carries on — instead of leaving it stranded and the run half-done. |
+
+## Screenshots
+
+The companion **Dreame Scheduler** add-on gives you a full panel _(floor-plan details blurred for privacy)_:
+
+<p align="center"><img src="images/home.png" alt="Overview dashboard" width="820"></p>
+
+_Overview — robot status, next run, this week's progress, suggestions and coverage._
+
+<p align="center"><img src="images/map.png" alt="Floor Plan Studio" width="820"></p>
+
+_Floor Plan Studio (beta) — draw no-go / no-mop zones and virtual walls, auto-fit &amp; weld rooms, a live 3D view, and export to your own dashboard._
+
+<p align="center"><img src="images/report.png" alt="Weekly report" width="820"></p>
+
+_Report — per-room status this week, why rooms were missed, and the robot's own coverage renders._
 
 ## What it does
 
