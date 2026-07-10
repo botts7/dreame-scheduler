@@ -3,6 +3,19 @@
 All notable changes to the Dreame Scheduler integration and its companion
 add-on are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.1.1] — 2026-07-10
+
+Branding and packaging release — no behaviour changes.
+
+- Bundled brand icon and logo in `custom_components/dreame_scheduler/brand/`
+  so Home Assistant and HACS display the Dreame Scheduler artwork directly
+  (HA Brands Proxy API, 2026.3.0+; local images take priority over the CDN).
+- README: wordmark banner, a Highlights row (presence / reporting /
+  self-healing), privacy-blurred screenshots, and dynamic version + license
+  badges that track releases.
+- CI: HACS validation now runs with no ignored checks (brands satisfied by the
+  bundled `brand/` folder) — required for HACS default-store inclusion.
+
 ## [0.1.0] — 2026-07-10
 
 First public release.
