@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Internal release/security working docs — kept local, never published (they
+# enumerate not-yet-fixed weaknesses; a public copy would be an attacker map).
+RELEASE.md
+RELEASE_READINESS.md
+PUBLISHING.md

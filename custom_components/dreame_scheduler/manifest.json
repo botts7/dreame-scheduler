@@ -1,0 +1,16 @@
+{
+  "domain": "dreame_scheduler",
+  "name": "Dreame Scheduler",
+  "codeowners": [
+    "@botts7"
+  ],
+  "config_flow": true,
+  "after_dependencies": [
+    "dreame_vacuum"
+  ],
+  "documentation": "https://github.com/botts7/dreame-scheduler",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/botts7/dreame-scheduler/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}

@@ -1,0 +1,100 @@
+_vacuum_field: &vacuum_field
+  vacuum:
+    name: Vacuum
+    description: >-
+      Target a specific robot (its vacuum.* entity) in a multi-vacuum home.
+      Leave empty to apply to every configured scheduler.
+    required: false
+    example: vacuum.dreamebot_l20_ultra
+    selector:
+      entity:
+        integration: dreame_vacuum
+        domain: vacuum
+
+run_scheduled_now:
+  name: Run today's schedule now
+  description: >-
+    Immediately clean the rooms scheduled for today, bypassing the
+    presence/window/time gates (still respects door, station and error guards).
+  fields:
+    quiet:
+      name: Quiet mode
+      description: Use the configured quiet suction (for cleaning while home).
+      default: false
+      selector:
+        boolean:
+    <<: *vacuum_field
+
+run_catchup_now:
+  name: Clean pending rooms now
+  description: >-
+    Immediately clean every room not yet done this week (the weekly whole-house
+    catch-up), bypassing presence/window/time gates.
+  fields:
+    quiet:
+      name: Quiet mode
+      description: Use the configured quiet suction (for cleaning while home).
+      default: false
+      selector:
+        boolean:
+    <<: *vacuum_field
+
+reset_week:
+  name: Reset week counters
+  description: >-
+    Clear the "cleaned this week" tracking and start a fresh tracking week now.
+  fields:
+    <<: *vacuum_field
+
+clean_rooms:
+  name: Clean specific rooms now
+  description: >-
+    Send the robot to clean the given room segment ids now, as a manual override
+    (drops any presence-paused run and is exempt from return-on-arrival). Used by
+    the add-on's tap-a-room-on-the-plan feature.
+  fields:
+    segments:
+      name: Room segments
+      description: List of room segment ids to clean (as shown on the map).
+      required: true
+      example: "[1, 4, 7]"
+      selector:
+        object:
+    quiet:
+      name: Quiet mode
+      description: Use the configured quiet suction (for cleaning while home).
+      default: false
+      selector:
+        boolean:
+    <<: *vacuum_field
+
+get_config:
+  name: Get scheduler configuration
+  description: >-
+    Return this scheduler's current options, discovered rooms and entity ids.
+    Intended for the companion add-on GUI (behind ingress); returns a response.
+  fields:
+    <<: *vacuum_field
+
+set_config:
+  name: Set scheduler configuration
+  description: >-
+    Write a partial options object into the scheduler's config entry. Intended
+    for the companion add-on GUI; unknown keys and invalid values are rejected.
+  fields:
+    options:
+      name: Options
+      description: Partial options object to merge into the entry.
+      required: true
+      selector:
+        object:
+    <<: *vacuum_field
+
+get_report:
+  name: Get cleaning report
+  description: >-
+    Return the weekly cleaning report (per-room status, coverage, obstacles,
+    run history) for the Report tab. Intended for the add-on GUI; returns a
+    response.
+  fields:
+    <<: *vacuum_field

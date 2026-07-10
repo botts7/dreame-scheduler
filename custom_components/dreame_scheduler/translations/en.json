@@ -1,0 +1,92 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Dreame Scheduler",
+        "description": "Choose the Dreame vacuum to schedule. You can add the integration again for a second robot.",
+        "data": {
+          "vacuum_entity": "Vacuum"
+        }
+      }
+    },
+    "error": {
+      "prefix_mismatch": "That vacuum's entities couldn't be found (it may have been renamed). The scheduler needs the vacuum, its sensors and room selects to share one name. Rename it back, or re-add it, then try again."
+    },
+    "abort": {
+      "already_configured": "This vacuum already has a scheduler."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Dreame Scheduler options",
+        "menu_options": {
+          "general": "General (window, guards, catch-up, quiet)",
+          "presence": "Presence & notifications",
+          "rooms": "Rooms (per-room schedule)"
+        }
+      },
+      "general": {
+        "title": "General",
+        "description": "When cleaning is allowed to run, guards before starting, the weekly whole-house catch-up, and quiet mode.",
+        "data": {
+          "window_enabled": "Restrict to a time window",
+          "window_start": "Window start",
+          "window_end": "Window end",
+          "window_overrun": "Finish the current room if the window closes mid-clean",
+          "daily_time": "Daily dispatch time",
+          "min_battery": "Minimum battery to start",
+          "guard_dustbin": "Skip if dust bag full",
+          "guard_water": "Skip if water tanks need attention",
+          "return_on_arrival": "Return to dock if someone comes home",
+          "resume_when_away": "Resume remaining rooms once everyone leaves again",
+          "catchup_enabled": "Guarantee whole house once a week",
+          "catchup_day": "Catch-up day",
+          "catchup_time": "Catch-up time",
+          "week_start_day": "Week starts on",
+          "stale_nudge_enabled": "Nudge me to clean while home if overdue",
+          "stale_after_days": "Nudge after this many days without a clean",
+          "default_mode": "Default cleaning mode",
+          "default_suction": "Default suction",
+          "quiet_suction": "Quiet-mode suction"
+        }
+      },
+      "presence": {
+        "title": "Presence & notifications",
+        "description": "Who counts as 'home', and where alerts go.",
+        "data": {
+          "require_away": "Only clean when no one is home",
+          "presence_entities": "People / trackers that mean 'home'",
+          "away_grace_min": "Wait this long after everyone leaves",
+          "notify_targets": "Notification targets",
+          "notify_stuck": "Notify if the robot gets stuck",
+          "notify_skipped": "Notify when rooms are skipped",
+          "notify_weekly": "Weekly whole-house summary"
+        }
+      },
+      "rooms": {
+        "title": "Rooms",
+        "description": "Pick a room to set its schedule.",
+        "data": {
+          "room": "Room"
+        }
+      },
+      "room_edit": {
+        "title": "Room: {room}",
+        "description": "Schedule and per-room settings. Leave mode/suction blank to use the defaults.",
+        "data": {
+          "enabled": "Include this room in the schedule",
+          "days": "Clean on these days",
+          "mode": "Cleaning mode (blank = default)",
+          "suction": "Suction (blank = default)",
+          "wetness": "Mop wetness (blank = default)",
+          "repeats": "Passes",
+          "door_sensor": "Door sensor (optional — skip when closed)"
+        }
+      }
+    },
+    "abort": {
+      "no_rooms": "No rooms found yet. Let the vacuum finish a full map first, then try again."
+    }
+  }
+}
