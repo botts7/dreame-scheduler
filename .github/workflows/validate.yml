@@ -23,6 +23,5 @@ jobs:
       - uses: hacs/action@main
         with:
           category: integration
-          # 'brands' requires a separate PR to home-assistant/brands; not needed
-          # for a custom repository to install and function.
-          ignore: brands
+          # No ignores: brands are served from custom_components/dreame_scheduler/brand/
+          # (HA Brands Proxy API). Required for HACS default-store inclusion.
