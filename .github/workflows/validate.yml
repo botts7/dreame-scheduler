@@ -23,3 +23,6 @@ jobs:
       - uses: hacs/action@main
         with:
           category: integration
+          # 'brands' requires a separate PR to home-assistant/brands; not needed
+          # for a custom repository to install and function.
+          ignore: brands

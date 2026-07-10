@@ -1,16 +1,3 @@
-_vacuum_field: &vacuum_field
-  vacuum:
-    name: Vacuum
-    description: >-
-      Target a specific robot (its vacuum.* entity) in a multi-vacuum home.
-      Leave empty to apply to every configured scheduler.
-    required: false
-    example: vacuum.dreamebot_l20_ultra
-    selector:
-      entity:
-        integration: dreame_vacuum
-        domain: vacuum
-
 run_scheduled_now:
   name: Run today's schedule now
   description: >-
@@ -23,7 +10,17 @@ run_scheduled_now:
       default: false
       selector:
         boolean:
-    <<: *vacuum_field
+    vacuum:
+      name: Vacuum
+      description: >-
+        Target a specific robot (its vacuum.* entity) in a multi-vacuum home.
+        Leave empty to apply to every configured scheduler.
+      required: false
+      example: vacuum.dreamebot_l20_ultra
+      selector:
+        entity:
+          integration: dreame_vacuum
+          domain: vacuum
 
 run_catchup_now:
   name: Clean pending rooms now
@@ -37,14 +34,32 @@ run_catchup_now:
       default: false
       selector:
         boolean:
-    <<: *vacuum_field
+    vacuum:
+      name: Vacuum
+      description: >-
+        Target a specific robot in a multi-vacuum home. Leave empty for all.
+      required: false
+      example: vacuum.dreamebot_l20_ultra
+      selector:
+        entity:
+          integration: dreame_vacuum
+          domain: vacuum
 
 reset_week:
   name: Reset week counters
   description: >-
     Clear the "cleaned this week" tracking and start a fresh tracking week now.
   fields:
-    <<: *vacuum_field
+    vacuum:
+      name: Vacuum
+      description: >-
+        Target a specific robot in a multi-vacuum home. Leave empty for all.
+      required: false
+      example: vacuum.dreamebot_l20_ultra
+      selector:
+        entity:
+          integration: dreame_vacuum
+          domain: vacuum
 
 clean_rooms:
   name: Clean specific rooms now
@@ -66,7 +81,16 @@ clean_rooms:
       default: false
       selector:
         boolean:
-    <<: *vacuum_field
+    vacuum:
+      name: Vacuum
+      description: >-
+        Target a specific robot in a multi-vacuum home. Leave empty for all.
+      required: false
+      example: vacuum.dreamebot_l20_ultra
+      selector:
+        entity:
+          integration: dreame_vacuum
+          domain: vacuum
 
 get_config:
   name: Get scheduler configuration
@@ -74,7 +98,15 @@ get_config:
     Return this scheduler's current options, discovered rooms and entity ids.
     Intended for the companion add-on GUI (behind ingress); returns a response.
   fields:
-    <<: *vacuum_field
+    vacuum:
+      name: Vacuum
+      description: Target a specific robot in a multi-vacuum home.
+      required: false
+      example: vacuum.dreamebot_l20_ultra
+      selector:
+        entity:
+          integration: dreame_vacuum
+          domain: vacuum
 
 set_config:
   name: Set scheduler configuration
@@ -88,7 +120,15 @@ set_config:
       required: true
       selector:
         object:
-    <<: *vacuum_field
+    vacuum:
+      name: Vacuum
+      description: Target a specific robot in a multi-vacuum home.
+      required: false
+      example: vacuum.dreamebot_l20_ultra
+      selector:
+        entity:
+          integration: dreame_vacuum
+          domain: vacuum
 
 get_report:
   name: Get cleaning report
@@ -97,4 +137,12 @@ get_report:
     run history) for the Report tab. Intended for the add-on GUI; returns a
     response.
   fields:
-    <<: *vacuum_field
+    vacuum:
+      name: Vacuum
+      description: Target a specific robot in a multi-vacuum home.
+      required: false
+      example: vacuum.dreamebot_l20_ultra
+      selector:
+        entity:
+          integration: dreame_vacuum
+          domain: vacuum
