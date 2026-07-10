@@ -8,8 +8,8 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/HACS-Custom-41BDF5" alt="HACS">
-  <img src="https://img.shields.io/badge/version-0.1.0-blue" alt="version">
-  <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
+  <img src="https://img.shields.io/github/v/release/botts7/dreame-scheduler?label=version&color=blue&sort=semver" alt="version">
+  <img src="https://img.shields.io/github/license/botts7/dreame-scheduler?color=green" alt="license">
 </p>
 
 Schedule cleaning per room and per weekday, only when nobody's home, with a
