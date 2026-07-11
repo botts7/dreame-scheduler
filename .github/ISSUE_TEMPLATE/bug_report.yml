@@ -1,0 +1,87 @@
+name: Bug report
+description: Something isn't working the way it should
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a report. The version numbers and logs below are what make a bug actually fixable — please fill in as much as you can.
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before you start
+      options:
+        - label: I've searched existing issues and this isn't a duplicate
+          required: true
+        - label: I'm on the latest version of Dreame Scheduler
+          required: true
+        - label: The Tasshack `dreame_vacuum` integration is installed and my vacuum works in Home Assistant on its own
+          required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you expect to happen, and what actually happened?
+      placeholder: e.g. "The kitchen is scheduled for Mondays, but the scheduler marked it 'skipped' and never retried it."
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+  - type: input
+    id: ds_version
+    attributes:
+      label: Dreame Scheduler version
+      placeholder: e.g. 0.1.1
+    validations:
+      required: true
+  - type: input
+    id: ha_version
+    attributes:
+      label: Home Assistant version
+      placeholder: e.g. 2026.7.0
+    validations:
+      required: true
+  - type: input
+    id: dv_version
+    attributes:
+      label: dreame_vacuum integration version
+      placeholder: e.g. 2.x.x
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Vacuum model
+      placeholder: e.g. DreameBot L20 Ultra
+    validations:
+      required: true
+  - type: dropdown
+    id: addon
+    attributes:
+      label: Are you using the companion add-on (GUI)?
+      options:
+        - "No — integration only"
+        - "Yes — the Dreame Scheduler add-on"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: |
+        Turn on debug logging, reproduce the problem, then paste the `custom_components.dreame_scheduler` lines. To enable it, add this to `configuration.yaml` and restart:
+
+        ```yaml
+        logger:
+          logs:
+            custom_components.dreame_scheduler: debug
+        ```
+
+        This box is formatted automatically — no backticks needed.
+      render: text

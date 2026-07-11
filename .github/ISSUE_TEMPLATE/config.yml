@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Prerequisite — Tasshack dreame_vacuum
+    url: https://github.com/Tasshack/dreame-vacuum
+    about: If the problem is with the underlying vacuum integration or its entities/states (not the scheduling logic), please report it there instead.
+  - name: Question or usage help
+    url: https://community.home-assistant.io/
+    about: For "how do I set this up" questions, the Home Assistant Community forum is the best place.
