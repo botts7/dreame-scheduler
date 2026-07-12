@@ -1,4 +1,4 @@
-"""The scheduler engine â€” all Home Assistant I/O for one config entry.
+"""The scheduler engine — all Home Assistant I/O for one config entry.
 
 Runs the behaviour itself (like the wallbox ChargeAssistant): a 60s tick plus
 state-change reactions drive pure decisions from scheduler.py / clean_window.py
@@ -126,7 +126,7 @@ _ACTIVE_STATES = ("cleaning", "returning", "paused")
 # States that mean the run has ended and the robot is parked.
 _PARKED_STATES = ("docked", "idle")
 # Substrings in status/task_status that mean the robot is still in a cleaning
-# job â€” including going back to the dock to FETCH/INSTALL the mop mid-task (it
+# job — including going back to the dock to FETCH/INSTALL the mop mid-task (it
 # will resume cleaning after). Post-clean maintenance (washing/drying/emptying)
 # is deliberately NOT here: once the robot is parked and only doing those, the
 # clean itself is finished. Keep 'install_mop' but never bare 'mop' (that would
@@ -145,13 +145,13 @@ COMPLETE_DWELL_SECONDS = 45
 # was finalised record-less, mis-skipping every unvisited room.)
 RECORD_SYNC_WAIT_SECONDS = 300
 # Watchdog for a suspended (map-resume) run: a presence entity wedged at "home"
-# (or a genuinely full house) must not freeze the scheduler forever â€” the Dreame
+# (or a genuinely full house) must not freeze the scheduler forever — the Dreame
 # breakpoint expires after hours anyway. Past this age, finalise as interrupted
 # and queue the remaining rooms.
 SUSPEND_MAX_SECONDS = 24 * 3600
 # A history record with completed=False is a PARTIAL session of a task the robot
 # intends to resume (dock to wash the mop / recharge, then head back out). Only
-# trust it as the task end after this long parked with no renewed activity â€”
+# trust it as the task end after this long parked with no renewed activity —
 # the final session's record arrives with completed=True and finalises at once.
 INCOMPLETE_RECORD_DWELL_SECONDS = 1800
 # Allowed skew (seconds) between HA 'now' and a record's timestamp (the cleaning
@@ -159,7 +159,7 @@ INCOMPLETE_RECORD_DWELL_SECONDS = 1800
 RECORD_TS_TOLERANCE = 120
 
 # --- Auto-recovery (unstick + carry on) ---
-# Vacuum error substrings that mean "physically stuck but likely reversible" â€”
+# Vacuum error substrings that mean "physically stuck but likely reversible" —
 # worth trying to free rather than just giving up.
 _RECOVERABLE_ERROR_WORDS = (
     "suffocate", "stuck", "trap", "wheel", "bumper", "cliff", "tangle",
@@ -229,7 +229,7 @@ class SchedulerEngine:
         return self.entry.options.get(key, default)
 
     def _opt_int(self, key, default):
-        """Option read that always yields an int â€” a stored value that's None or
+        """Option read that always yields an int — a stored value that's None or
         non-numeric (legacy entry, hand-edited options) falls back to the default
         instead of raising and failing the entry's setup tick."""
         try:
@@ -275,7 +275,7 @@ class SchedulerEngine:
         # Only a GENUINE fault should block/interrupt cleaning. The vacuum
         # entity's own 'error' state is that signal. sensor.error also reports
         # harmless maintenance reminders (e.g. 'clean_mop_pad', 'dust_bag_full'
-        # hints) which must NOT stop a scheduled clean â€” so we deliberately do
+        # hints) which must NOT stop a scheduled clean — so we deliberately do
         # not treat sensor.error text as blocking.
         return (self._vacuum_state() or "") == "error"
 
@@ -358,13 +358,13 @@ class SchedulerEngine:
 
         NOTE: the free-then-continue command sequence (return_to_base to free,
         then vacuum.start to continue) is the one part that wants live tuning per
-        model â€” kept isolated here so it's easy to adjust."""
+        model — kept isolated here so it's easy to adjust."""
         if not bool(self._opt(OPT_AUTO_RECOVER, DEFAULT_AUTO_RECOVER)):
             return False
 
         if run.get("recovering"):
             if self._vacuum_state() is not None and not self._error_active():
-                # Freed itself. (An UNAVAILABLE entity is NOT "error cleared" â€”
+                # Freed itself. (An UNAVAILABLE entity is NOT "error cleared" —
                 # a blind vacuum.start on an unknown state can launch a
                 # full-house clean.) If someone came home during the recovery,
                 # dock instead of resuming into an occupied house.
@@ -375,12 +375,12 @@ class SchedulerEngine:
                                   and self._presence_home() is True))
                 if home_block:
                     await self._svc("vacuum", "return_to_base", {"entity_id": self._vacuum_entity})
-                    self._set_status("returning", "recovered â€” someone home, docking")
+                    self._set_status("returning", "recovered — someone home, docking")
                 else:
                     # Resume the clean; the fresh no-go keeps it clear of the
                     # trap. Don't let it just dock.
                     await self._svc("vacuum", "start", {"entity_id": self._vacuum_entity})
-                    self._set_status("running", "recovered â€” carrying on, steering clear of the stuck spot")
+                    self._set_status("running", "recovered — carrying on, steering clear of the stuck spot")
                 run["recovering"] = False
                 await self.tracker.async_set_active_run(run)
                 return True
@@ -389,7 +389,7 @@ class SchedulerEngine:
             if waited < RECOVER_FREE_TIMEOUT:
                 self._set_status("returning", "freeing itself from a stuck spot")
                 return True
-            # Couldn't free itself in time â€” stop trying; fall through to the
+            # Couldn't free itself in time — stop trying; fall through to the
             # normal stuck-notify + completion handling (which will dock/alert).
             run["recovering"] = False
             await self.tracker.async_set_active_run(run)
@@ -398,7 +398,7 @@ class SchedulerEngine:
         if not self._recoverable_error():
             return False
         if int(run.get("recover_count", 0)) >= MAX_RECOVER_ATTEMPTS:
-            # Give up â€” but at least try to bring it home once before falling
+            # Give up — but at least try to bring it home once before falling
             # through to the error notify (nothing else ever docks it).
             if not run.get("gave_up_dock"):
                 run["gave_up_dock"] = True
@@ -423,8 +423,8 @@ class SchedulerEngine:
         await self._svc("vacuum", "return_to_base", {"entity_id": self._vacuum_entity})
         if bool(self._opt(OPT_NOTIFY_STUCK, DEFAULT_NOTIFY_STUCK)):
             await self._notify(
-                "ðŸ›Ÿ Vacuum recovering",
-                f"Got stuck near {where} â€” walled off the spot and freeing it to carry on.",
+                "🛟 Vacuum recovering",
+                f"Got stuck near {where} — walled off the spot and freeing it to carry on.",
             )
         _LOGGER.info("auto-recover: attempt %s near %s at %s", run["recover_count"], where, pos)
         return True
@@ -471,7 +471,7 @@ class SchedulerEngine:
         return nm or f"Room {seg}"
 
     def _cleaning_count(self) -> int | None:
-        """Monotonic 'number of cleans' counter â€” increments once per completed
+        """Monotonic 'number of cleans' counter — increments once per completed
         clean. The definitive 'a clean just finished' signal (works even for a
         room that finishes in seconds)."""
         raw = self._sval(entity_of("sensor", self._prefix, "cleaning_count"))
@@ -482,11 +482,11 @@ class SchedulerEngine:
 
     def _latest_history_record(self, min_ts: float | None = None) -> dict | None:
         """The most recent cleaning-history record. Each record carries
-        ``blocked_rooms`` ({segment_id: reason}) and ``cleaned_area`` â€” the map-
+        ``blocked_rooms`` ({segment_id: reason}) and ``cleaned_area`` — the map-
         derived truth of what actually got cleaned this run.
 
         When ``min_ts`` is given, only return the newest record if it belongs to
-        this run (its timestamp â€” the cleaning session start â€” is at/after the
+        this run (its timestamp — the cleaning session start — is at/after the
         run start, minus a skew tolerance). Otherwise return None so the caller
         knows the fresh record hasn't synced yet and can wait, rather than
         finalising off the PREVIOUS run's record."""
@@ -507,7 +507,7 @@ class SchedulerEngine:
         return best
 
     def _newest_record_ts(self) -> int | None:
-        """Timestamp of the newest history record right now â€” captured at
+        """Timestamp of the newest history record right now — captured at
         dispatch as the run's baseline, so a record that already existed can
         never be mistaken for this run's outcome (the min_ts skew tolerance
         alone lets a task that ended seconds before dispatch through)."""
@@ -534,7 +534,7 @@ class SchedulerEngine:
         return rec
 
     def _charging_mid_task(self) -> bool:
-        """Recharging below full â€” a big multi-session task can sit on the dock
+        """Recharging below full — a big multi-session task can sit on the dock
         well past any fixed dwell before heading back out; don't declare the run
         finished while the robot is just refuelling."""
         st = (self._sval(entity_of("sensor", self._prefix, "charging_status")) or "").lower()
@@ -558,7 +558,7 @@ class SchedulerEngine:
                 visited = run.setdefault("visited", [])
                 if new.state not in visited:
                     visited.append(new.state)
-                    # Persist â€” otherwise a Store reload (e.g. options update)
+                    # Persist — otherwise a Store reload (e.g. options update)
                     # drops the in-flight visited list, and it's the fallback
                     # signal for crediting a room on an abnormal end.
                     self.hass.async_create_task(self._persist_visited(run))
@@ -566,16 +566,16 @@ class SchedulerEngine:
 
     async def _persist_visited(self, run: dict) -> None:
         # Queued from a state event: by the time this executes the run may have
-        # been finalised â€” writing it back then RESURRECTS a finished run, which
+        # been finalised — writing it back then RESURRECTS a finished run, which
         # the next tick re-finalises (duplicate history + double room banking).
         if self.tracker.active_run is run:
             await self.tracker.async_set_active_run(run)
 
     async def _tick(self) -> None:
-        # One evaluation at a time â€” an overlapping tick (state events fire one
+        # One evaluation at a time — an overlapping tick (state events fire one
         # per current_room change) must not re-finalise or re-dispatch; the next
         # interval tick re-evaluates anyway. Manual actions share the same lock
-        # (they wait rather than skip â€” a user action must run).
+        # (they wait rather than skip — a user action must run).
         if self._eval_lock.locked():
             return
         async with self._eval_lock:
@@ -591,7 +591,7 @@ class SchedulerEngine:
         weekday = now.weekday()
         now_min = now.hour * 60 + now.minute
 
-        # 1) Weekly rollover â€” finalise the finished week, then reset counters.
+        # 1) Weekly rollover — finalise the finished week, then reset counters.
         # Deferred while a run is in flight: rolling mid-run would land that
         # run's cleaned marks in the NEW week (those rooms would then be skipped
         # for the whole following week) and seed it with the old run's strikes.
@@ -605,7 +605,7 @@ class SchedulerEngine:
         # 2) Presence grace bookkeeping.
         away_ok = await self._update_presence(now)
 
-        # 3) A run is in flight â†’ verify/await it; never dispatch concurrently.
+        # 3) A run is in flight → verify/await it; never dispatch concurrently.
         if self.tracker.active_run is not None:
             await self._check_active_run(now, away_ok)
             return
@@ -631,7 +631,7 @@ class SchedulerEngine:
         )
 
         if decision.action == "idle":
-            # Nothing due, OR the day/week is already handled â€” record that so we
+            # Nothing due, OR the day/week is already handled — record that so we
             # don't re-scan every tick, and surface a friendly idle status.
             if decision.kind == "daily" and decision.reason == "nothing_due_today":
                 await self.tracker.async_set_day_dispatched(today.isoformat())
@@ -641,7 +641,7 @@ class SchedulerEngine:
             self._set_status("idle", self._idle_reason(now, away_ok))
             return
 
-        # 5) A dispatch is due â€” apply live gates (door / presence / window /
+        # 5) A dispatch is due — apply live gates (door / presence / window /
         #    battery / station) before actually sending the robot out.
         await self._attempt_dispatch(decision, now, now_min, away_ok)
 
@@ -661,7 +661,7 @@ class SchedulerEngine:
             if since is None:
                 return False
             return (now - since).total_seconds() >= grace * 60
-        # someone home, or presence unknown â†’ not away
+        # someone home, or presence unknown → not away
         await self.tracker.async_set_away_since(None)
         return False
 
@@ -684,7 +684,7 @@ class SchedulerEngine:
             self._set_status("waiting", reason)
             return
 
-        # c) Door reachability â€” drop closed-door rooms. Side effects are safe
+        # c) Door reachability — drop closed-door rooms. Side effects are safe
         #    now: we dispatch or consume the day immediately below, so this runs
         #    once per decision, not once per tick.
         reachable, blocked = [], []
@@ -699,7 +699,7 @@ class SchedulerEngine:
                 names = ", ".join(self._room_name(s) for s in blocked)
                 await self._notify(
                     "Vacuum: rooms skipped",
-                    f"Door closed â€” skipped {names}. Will retry on the catch-up day.",
+                    f"Door closed — skipped {names}. Will retry on the catch-up day.",
                 )
 
         if not reachable:
@@ -707,7 +707,7 @@ class SchedulerEngine:
             self._set_status("idle", "all due rooms unreachable (doors closed)")
             return
 
-        # d) All clear â€” go.
+        # d) All clear — go.
         await self._dispatch_clean(reachable, decision.kind, now)
         await self._mark_dispatched(decision.kind, today_iso)
 
@@ -763,7 +763,7 @@ class SchedulerEngine:
         seg_names = {str(s): self._room_name(s) for s in segments}
         quiet_suction = self._opt(OPT_QUIET_SUCTION, "")
 
-        # Claim the run BEFORE any service call â€” a concurrent evaluation must
+        # Claim the run BEFORE any service call — a concurrent evaluation must
         # see active_run set, or both dispatch. count_at_start and the newest-
         # record baseline are read here, before the robot can react, so a record
         # from a PREVIOUS task can never score this run.
@@ -785,7 +785,7 @@ class SchedulerEngine:
         if deep:
             # Vacuum-before-mop: sweep the whole area, THEN mop it (no smearing).
             # Uses the GLOBAL sequential mode, so per-room modes/suction don't
-            # apply this run â€” the robot does one sweep-then-mop pass over all
+            # apply this run — the robot does one sweep-then-mop pass over all
             # target rooms.
             seq = self._pick_seq_mode()
             await self._svc("switch", "turn_off",
@@ -855,28 +855,28 @@ class SchedulerEngine:
                 self._set_status("running", "resuming the un-cleaned area")
                 await self._notify(
                     "Vacuum resuming",
-                    "House is empty again â€” continuing where it left off (un-cleaned area only).",
+                    "House is empty again — continuing where it left off (un-cleaned area only).",
                 )
             else:
                 # Someone's still home. The robot firmware can auto-resume the
                 # paused segment task on its own, so keep ENFORCING the dock
-                # rather than passively waiting â€” otherwise it escapes and cleans
+                # rather than passively waiting — otherwise it escapes and cleans
                 # while they're home, and can get stuck with no alert (exactly
                 # what happened live 2026-07-08).
                 if (self._vacuum_state() or "") == "cleaning":
                     await self._svc("vacuum", "return_to_base", {"entity_id": self._vacuum_entity})
-                    self._set_status("returning", "someone home â€” sending back to the dock")
+                    self._set_status("returning", "someone home — sending back to the dock")
                 else:
-                    self._set_status("waiting", "paused (someone home) â€” will resume when empty")
+                    self._set_status("waiting", "paused (someone home) — will resume when empty")
                 # Stuck while suspended? The normal stuck-notify lives past this
-                # early return, so it never fires for a suspended run â€” alert here.
+                # early return, so it never fires for a suspended run — alert here.
                 if self._error_active() and not run.get("notified_stuck"):
                     run["notified_stuck"] = True
                     await self.tracker.async_set_active_run(run)
                     if bool(self._opt(OPT_NOTIFY_STUCK, DEFAULT_NOTIFY_STUCK)):
                         where = self._sval(entity_of("sensor", self._prefix, "current_room")) or "somewhere"
                         await self._notify(
-                            "âš ï¸ Vacuum needs help",
+                            "⚠️ Vacuum needs help",
                             f"The robot errored near {where} while paused for someone being home.",
                         )
             return
@@ -886,7 +886,7 @@ class SchedulerEngine:
         task = (self._sval(entity_of("sensor", self._prefix, SUF_TASK_STATUS)) or "").lower()
         # "Actually cleaning" per the robot's own signals. The vacuum entity
         # state can briefly read docked/idle while task/status still say
-        # room_cleaning (mop fetch, base visits), so trust all three â€” otherwise
+        # room_cleaning (mop fetch, base visits), so trust all three — otherwise
         # seen_active can stay False through a whole run and the no-counter
         # fallback misclassifies it as failed_start.
         cleaning_active = (
@@ -900,7 +900,7 @@ class SchedulerEngine:
             run["seen_active"] = True
             await self.tracker.async_set_active_run(run)
 
-        # An 'interrupting' run was already sent home â€” but the firmware can
+        # An 'interrupting' run was already sent home — but the firmware can
         # auto-resume the paused segment task on its own (seen live 2026-07-08).
         # Keep enforcing the dock while someone is home, mirroring the
         # suspended-branch enforcement; without this the presence check below
@@ -908,10 +908,10 @@ class SchedulerEngine:
         if (run.get("interrupting") and vstate == "cleaning"
                 and self._presence_home() is True):
             await self._svc("vacuum", "return_to_base", {"entity_id": self._vacuum_entity})
-            self._set_status("returning", "someone home â€” sending back to the dock")
+            self._set_status("returning", "someone home — sending back to the dock")
             return
 
-        # Someone came home mid-run â†’ retreat to the dock so we don't annoy them.
+        # Someone came home mid-run → retreat to the dock so we don't annoy them.
         # (Manual runs opt out via kind == "manual".)
         if (run.get("kind") != "manual" and not run.get("interrupting")
                 and bool(self._opt(OPT_RETURN_ON_ARRIVAL, DEFAULT_RETURN_ON_ARRIVAL))
@@ -920,17 +920,17 @@ class SchedulerEngine:
             map_resume = bool(self._opt(OPT_MAP_RESUME, DEFAULT_MAP_RESUME))
             await self._svc("vacuum", "return_to_base", {"entity_id": self._vacuum_entity})
             await self._notify(
-                "Vacuum stepping aside â€” someone's home",
+                "Vacuum stepping aside — someone's home",
                 "Returning to the dock to stay out of your way. It'll "
                 + ("continue the un-cleaned area" if map_resume else "finish the remaining rooms")
                 + " once everyone's out again.",
             )
             if map_resume:
-                # Suspend the breakpoint-resume task â€” don't finalise; resume the
+                # Suspend the breakpoint-resume task — don't finalise; resume the
                 # un-cleaned area later via vacuum.start.
                 run["suspended"] = True
                 await self.tracker.async_set_active_run(run)
-                self._set_status("waiting", "someone home â€” paused (will resume un-cleaned area)")
+                self._set_status("waiting", "someone home — paused (will resume un-cleaned area)")
             else:
                 # Whole-room resume: mark interrupting so the metric-based
                 # completion finalises it, then the un-done rooms re-dispatch from
@@ -938,7 +938,7 @@ class SchedulerEngine:
                 # still moving) so room banking stays accurate.
                 run["interrupting"] = True
                 await self.tracker.async_set_active_run(run)
-                self._set_status("returning", "someone home â€” returning to dock")
+                self._set_status("returning", "someone home — returning to dock")
             return
 
         # Stuck? Try to unstick it and carry on (wall off the spot) before we
@@ -947,9 +947,9 @@ class SchedulerEngine:
         if await self._maybe_auto_recover(run, now):
             return
 
-        # Stuck/trapped mid-run â†’ remember it and notify once. The error state
+        # Stuck/trapped mid-run → remember it and notify once. The error state
         # frequently auto-clears once the robot gives up and returns to the dock,
-        # so a finalize-time check misses it â€” stick an `errored` flag on the run
+        # so a finalize-time check misses it — stick an `errored` flag on the run
         # now so a room the robot never actually reached isn't later credited as
         # a trusted full pass.
         if self._error_active():
@@ -963,7 +963,7 @@ class SchedulerEngine:
                 if bool(self._opt(OPT_NOTIFY_STUCK, DEFAULT_NOTIFY_STUCK)):
                     where = self._sval(entity_of("sensor", self._prefix, "current_room")) or "somewhere"
                     await self._notify(
-                        "âš ï¸ Vacuum needs help",
+                        "⚠️ Vacuum needs help",
                         f"The robot reported an error near {where} during the {run['kind']} clean.",
                     )
             if changed:
@@ -971,19 +971,19 @@ class SchedulerEngine:
 
         # --- Completion, driven by the robot's own metric, not a timer ---
         # A new cleaning-history record (cleaning_count increments) is the
-        # definitive "task finished" signal â€” a small room can finish in
+        # definitive "task finished" signal — a small room can finish in
         # seconds, and the robot docks mid-task to fetch/wash the mop, so
         # elapsed time and a bare "docked" state are both unreliable.
         count = self._cleaning_count()
         start_count = run.get("count_at_start")
         if count is not None and start_count is not None and count > start_count:
             # The counter also ticks when the robot docks MID-task (mop wash,
-            # recharge) and logs a partial session before heading back out â€” a
+            # recharge) and logs a partial session before heading back out — a
             # tick alone is not the end of the task. While the robot is still
             # (or again) working, keep the run open. (Live 2026-07-09: the run
             # was finalised at 10:02 while the robot was starting its second
             # session, mis-marking the remaining rooms as skipped.)
-            # (Interrupted runs that have physically docked skip this hold â€”
+            # (Interrupted runs that have physically docked skip this hold —
             # lingering "paused" task words would otherwise keep them open.)
             if cleaning_active and not (run.get("interrupting") and vstate in _PARKED_STATES):
                 if run.get("parked_since") or run.get("completed_at"):
@@ -1008,11 +1008,11 @@ class SchedulerEngine:
                 if waited < RECORD_SYNC_WAIT_SECONDS:
                     self._set_status("running", f"{run['kind']} wrapping up (syncing map)")
                     return
-            # completed=False â†’ a partial session of a task the robot means to
+            # completed=False → a partial session of a task the robot means to
             # resume. Hold the run open through a long parked dwell (extended
             # while it's recharging mid-task); a resume clears parked_since
             # above, and the final session's completed=True record finalises
-            # immediately as before. Interrupted runs skip the hold â€” we sent
+            # immediately as before. Interrupted runs skip the hold — we sent
             # the robot home; it is not going to resume.
             if (record is not None and record.get("completed") is False
                     and not run.get("interrupting")):
@@ -1024,7 +1024,7 @@ class SchedulerEngine:
                 if dwell < INCOMPLETE_RECORD_DWELL_SECONDS or self._charging_mid_task():
                     self._set_status(
                         "running",
-                        f"{run['kind']} paused at the dock â€” waiting for the robot to resume",
+                        f"{run['kind']} paused at the dock — waiting for the robot to resume",
                     )
                     return
             await self._finalize_run(run, now, record=record,
@@ -1044,7 +1044,7 @@ class SchedulerEngine:
             self._set_status("running", f"{run['kind']} clean in progress")
             return
 
-        # Parked and not in any cleaning/mop-fetch state, yet no counter tick â€”
+        # Parked and not in any cleaning/mop-fetch state, yet no counter tick —
         # dwell briefly then finalise (best-effort coverage), or declare
         # failed-to-start if it never became active.
         if not run.get("parked_since"):
@@ -1053,7 +1053,7 @@ class SchedulerEngine:
         parked = _parse_iso(run.get("parked_since"))
         dwell = (now - parked).total_seconds() if parked else 0
         if run.get("seen_active") and dwell >= COMPLETE_DWELL_SECONDS:
-            # Counter lagging or unavailable â€” check the record anyway. A
+            # Counter lagging or unavailable — check the record anyway. A
             # completed=False record is a mid-task dock (wash/recharge), not
             # the end: give it the long dwell rather than 45 s.
             record = self._run_record(run)
@@ -1063,7 +1063,7 @@ class SchedulerEngine:
                          or self._charging_mid_task())):
                 self._set_status(
                     "running",
-                    f"{run['kind']} paused at the dock â€” waiting for the robot to resume",
+                    f"{run['kind']} paused at the dock — waiting for the robot to resume",
                 )
                 return
             await self._finalize_run(run, now, record=record,
@@ -1079,7 +1079,7 @@ class SchedulerEngine:
         seg_names = run.get("seg_names", {})
         ts = now.isoformat()
 
-        # Remove any temporary no-go boxes we dropped to recover from a wedge â€”
+        # Remove any temporary no-go boxes we dropped to recover from a wedge —
         # they were for this run only (the furniture that caused it may move).
         await self._clear_temp_nogos(run)
 
@@ -1090,7 +1090,7 @@ class SchedulerEngine:
             blocked_reasons = {str(k): v for k, v in record["blocked_rooms"].items()}
         blocked = set(blocked_reasons)
 
-        # A room is banked as cleaned only when we can TRUST it â€” never from the
+        # A room is banked as cleaned only when we can TRUST it — never from the
         # robot's "Task completed" text (it reports that even on a manual return-
         # to-base). We trust: a normal, error-free, non-interrupted full pass
         # (rooms not in the map's blocked list), or a room we actually saw the
@@ -1119,7 +1119,7 @@ class SchedulerEngine:
         if cleaned:
             await self.tracker.async_mark_cleaned(cleaned, ts)
 
-        # Interrupted: the un-done rooms are deferred, not failures â€” queue them.
+        # Interrupted: the un-done rooms are deferred, not failures — queue them.
         if interrupted:
             if skipped and bool(self._opt(OPT_RESUME_WHEN_AWAY, DEFAULT_RESUME_WHEN_AWAY)):
                 await self.tracker.async_set_resume(
@@ -1131,7 +1131,7 @@ class SchedulerEngine:
                 "remaining": [seg_names.get(s, s) for s in skipped],
             })
             await self.tracker.async_set_active_run(None)
-            self._set_status("waiting", "paused (someone home) â€” will resume when empty")
+            self._set_status("waiting", "paused (someone home) — will resume when empty")
             return
 
         # Normal end: skipped rooms stay pending; notify WITH the reason.
@@ -1145,7 +1145,7 @@ class SchedulerEngine:
                 ]
                 await self._notify(
                     "Vacuum: rooms not finished",
-                    "Skipped " + ", ".join(parts) + " â€” kept pending for the weekly catch-up.",
+                    "Skipped " + ", ".join(parts) + " — kept pending for the weekly catch-up.",
                 )
 
         area = record.get("cleaned_area") if record else None
@@ -1157,7 +1157,7 @@ class SchedulerEngine:
         })
 
         # Append to the run-history log (fail-trend / weekday analytics). Only
-        # normal ends are logged â€” interrupted runs returned above, so a room
+        # normal ends are logged — interrupted runs returned above, so a room
         # deferred by "someone came home" never counts as a fail.
         cfg_rooms = self._rooms()
         default_mode = self._opt(OPT_DEFAULT_MODE, "")
@@ -1178,13 +1178,13 @@ class SchedulerEngine:
 
         await self.tracker.async_set_active_run(None)
         self._set_status("idle", f"finished {run['kind']} clean")
-        _LOGGER.info("dreame_scheduler: %s run done â€” cleaned %s, skipped %s (area %s)",
+        _LOGGER.info("dreame_scheduler: %s run done — cleaned %s, skipped %s (area %s)",
                      run["kind"], cleaned, skipped, area)
 
     async def _maybe_weekly_notice(self, summary: dict) -> None:
         if not bool(self._opt(OPT_NOTIFY_WEEKLY, DEFAULT_NOTIFY_WEEKLY)):
             return
-        # First-ever rollover (no previous week recorded) â€” nothing to report.
+        # First-ever rollover (no previous week recorded) — nothing to report.
         if not summary.get("week_start"):
             return
         rooms = self._rooms()
@@ -1202,7 +1202,7 @@ class SchedulerEngine:
             def _line(seg: str) -> str:
                 name = self._room_name(seg)
                 c = int(unreach.get(seg, 0))
-                return f"{name} ({c}Ã— blocked)" if c else name
+                return f"{name} ({c}× blocked)" if c else name
 
             names = ", ".join(_line(s) for s in missed)
             await self._notify(
@@ -1213,7 +1213,7 @@ class SchedulerEngine:
         else:
             await self._notify(
                 "Weekly vacuum summary",
-                f"âœ… All {len(all_segs)} rooms were cleaned at least once this week.",
+                f"✅ All {len(all_segs)} rooms were cleaned at least once this week.",
             )
 
     # ----------------------------------------------------- resume + nudge
@@ -1227,7 +1227,7 @@ class SchedulerEngine:
             await self.tracker.async_set_resume(None)
             return False
         if not away_ok:
-            return False  # still someone home â€” keep the queue, wait
+            return False  # still someone home — keep the queue, wait
         reachable = [s for s in segs if clean_guards.room_reachable(self._door_state(s))]
         gates_ok, reason = self._start_gates_ok(now_min)
         if reachable and gates_ok:
@@ -1235,7 +1235,7 @@ class SchedulerEngine:
             await self.tracker.async_set_resume(None)
             return True
         # Not dispatchable right now (doors closed / a gate failing). Keep the
-        # queue but DON'T claim the tick â€” returning True here starved the daily
+        # queue but DON'T claim the tick — returning True here starved the daily
         # and catch-up schedules for as long as one queued room stayed blocked.
         why = reason if not gates_ok else "doors closed"
         self._set_status("waiting", f"waiting to resume remaining rooms ({why})")
@@ -1247,7 +1247,7 @@ class SchedulerEngine:
         if not bool(self._opt(OPT_STALE_NUDGE_ENABLED, DEFAULT_STALE_NUDGE_ENABLED)):
             return
         if away_ok:
-            return  # it can (or soon will) run on its own â€” no nudge needed
+            return  # it can (or soon will) run on its own — no nudge needed
         if not all_enabled_segments(self._rooms()):
             return
         today_iso = now.date().isoformat()
@@ -1261,9 +1261,9 @@ class SchedulerEngine:
         await self.tracker.async_set_nudged_on(today_iso)
         how_long = "a while" if last is None else f"{int((now - last).total_seconds() // 86400)} days"
         await self._notify(
-            "ðŸ§¹ Vacuum: shall I clean?",
+            "🧹 Vacuum: shall I clean?",
             f"The house hasn't been cleaned in {how_long} and someone's usually "
-            "home. Tap â€˜Clean nowâ€™ (or â€˜Clean now â€“ quietâ€™) on the dashboard to run it while you're in.",
+            "home. Tap 'Clean now' (or 'Clean now – quiet') on the dashboard to run it while you're in.",
         )
 
     # --------------------------------------------------------- manual actions
@@ -1285,7 +1285,7 @@ class SchedulerEngine:
 
     async def async_clean_rooms(self, segments, quiet: bool = False) -> None:
         """Manual: clean a specific set of rooms NOW (tap-a-room on the plan).
-        A user override â€” it drops any in-flight run first (e.g. a scheduled run
+        A user override — it drops any in-flight run first (e.g. a scheduled run
         that presence has paused), then dispatches as a ``manual`` run, which
         bypasses the presence/window/time gates AND is exempt from the
         return-on-arrival dock. So 'someone home' no longer fights it."""
@@ -1298,7 +1298,7 @@ class SchedulerEngine:
             old = self.tracker.active_run
             if old is not None:
                 # Overriding an in-flight run: remove its recovery no-go boxes
-                # first â€” _finalize_run (which normally clears them) never runs
+                # first — _finalize_run (which normally clears them) never runs
                 # for a dropped run, so they'd stay on the map permanently.
                 await self._clear_temp_nogos(old)
                 await self.tracker.async_set_active_run(None)
@@ -1399,12 +1399,12 @@ class SchedulerEngine:
 
         # Dashboard-ready one/two-line summary (drop into a Markdown card, no
         # add-on GUI needed).
-        bits = [f"âœ… {len(cleaned_names)} cleaned", f"ðŸŸ¡ {len(pend_names)} pending"]
+        bits = [f"✅ {len(cleaned_names)} cleaned", f"🟡 {len(pend_names)} pending"]
         if missed:
-            bits.append(f"ðŸ”´ {len(missed)} missed")
-        week_summary = "This week â€” " + " Â· ".join(bits)
+            bits.append(f"🔴 {len(missed)} missed")
+        week_summary = "This week — " + " · ".join(bits)
         if missed:
-            week_summary += "\nMissed: " + ", ".join(f"{n} ({c}Ã—)" for n, c in missed.items())
+            week_summary += "\nMissed: " + ", ".join(f"{n} ({c}×)" for n, c in missed.items())
 
         now = dt_util.now()
         nxt = self.next_run(now)
@@ -1423,7 +1423,7 @@ class SchedulerEngine:
             "week_summary": week_summary,
             "last_run": self.tracker.last_run,
             "active": self.tracker.active_run,
-            # Robot + presence/next-run summary â€” surfaced as sensor attributes
+            # Robot + presence/next-run summary — surfaced as sensor attributes
             # so the custom Lovelace card can render them from the one entity.
             "robot": self.robot_snapshot(),
             "presence_home": presence_home,
@@ -1452,7 +1452,7 @@ class SchedulerEngine:
                     await self.hass.services.async_call(
                         "notify", name, {"title": title, "message": message}, blocking=False
                     )
-            except Exception as err:  # noqa: BLE001 â€” never let a bad notify target break the run
+            except Exception as err:  # noqa: BLE001 — never let a bad notify target break the run
                 _LOGGER.warning("dreame_scheduler: notify '%s' failed: %s", name, err)
 
     async def _svc(self, domain: str, service: str, data: dict) -> None:
@@ -1463,7 +1463,7 @@ class SchedulerEngine:
 
     async def _select(self, entity_id: str, option: str) -> None:
         if self.hass.states.get(entity_id) is None:
-            return  # this model doesn't expose that per-room select â€” skip quietly
+            return  # this model doesn't expose that per-room select — skip quietly
         await self._svc("select", "select_option", {"entity_id": entity_id, "option": option})
 
 
