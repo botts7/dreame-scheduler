@@ -1250,6 +1250,18 @@ class SchedulerEngine:
             return  # it can (or soon will) run on its own — no nudge needed
         if not all_enabled_segments(self._rooms()):
             return
+        # Only nudge during sensible hours: the user's cleaning window if one is
+        # set, otherwise a daytime default. Without this the once-per-day counter
+        # re-arms at 00:00 and fires an overnight "shall I clean?" ping.
+        now_min = now.hour * 60 + now.minute
+        win_start = win_end = None
+        if bool(self._opt(OPT_WINDOW_ENABLED, DEFAULT_WINDOW_ENABLED)):
+            win_start = clean_window.to_minutes(self._opt(OPT_WINDOW_START, DEFAULT_WINDOW_START))
+            win_end = clean_window.to_minutes(self._opt(OPT_WINDOW_END, DEFAULT_WINDOW_END))
+        if win_start is None or win_end is None:
+            win_start, win_end = 8 * 60, 20 * 60   # daytime default 08:00-20:00
+        if not clean_window.in_window(now_min, win_start, win_end):
+            return
         today_iso = now.date().isoformat()
         if self.tracker.nudged_on == today_iso:
             return
