@@ -51,6 +51,8 @@ def _empty_state() -> dict:
         "nudged_on": None,      # date we last sent a stale-house nudge (once/day)
         "resume": None,         # {"segments": [...], "kind": "..."} to finish when empty
         "history": [],          # capped run log: [{ts, weekday, kind, per_room:{seg:{...}}}]
+        "stuck_events": [],     # capped stuck/recovery log for the learning engine:
+                                # [{ts, room, x, y, error, kind, attempt}]
     }
 
 
@@ -198,4 +200,18 @@ class WeekTracker:
         hist.append(entry)
         if len(hist) > cap:          # keep only the most recent `cap` runs
             del hist[: len(hist) - cap]
+        await self.async_save()
+
+    # ---- stuck/recovery event log (feeds the learning engine) ----
+    @property
+    def stuck_events(self) -> list:
+        return self._state.setdefault("stuck_events", [])
+
+    async def async_log_stuck(self, event: dict, cap: int = 300) -> None:
+        """Append a stuck/recovery event (where it wedged + context) for the
+        recurring-trap learner. Capped; pure telemetry, no behaviour of its own."""
+        evs = self.stuck_events
+        evs.append(event)
+        if len(evs) > cap:
+            del evs[: len(evs) - cap]
         await self.async_save()

@@ -438,6 +438,18 @@ class SchedulerEngine:
         run["recover_started"] = now.isoformat()
         run["errored"] = True
         await self.tracker.async_set_active_run(run)
+        # Telemetry for the learning engine: where it wedged + the error + attempt
+        # number. Pure capped logging, no behaviour -- the recurring-trap learner
+        # clusters these to decide when a spot has earned a permanent no-go.
+        await self.tracker.async_log_stuck({
+            "ts": now.isoformat(),
+            "room": where,
+            "x": pos[0] if pos else None,
+            "y": pos[1] if pos else None,
+            "error": (self._sval(entity_of("sensor", self._prefix, SUF_ERROR)) or "unknown"),
+            "kind": run.get("kind"),
+            "attempt": run["recover_count"],
+        })
         # Reverse out first — back off the trap the way it came in. return_to_base
         # alone kept ramming the blocked path forward (live 2026-07-13: a route
         # error at a rug lip); a straight reverse retraces the entry route and
