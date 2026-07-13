@@ -164,8 +164,10 @@ RECORD_TS_TOLERANCE = 120
 # worth trying to free rather than just giving up.
 _RECOVERABLE_ERROR_WORDS = (
     "suffocate", "stuck", "trap", "wheel", "bumper", "cliff", "tangle",
-    "edge", "picked", "lifted",
+    "edge", "picked", "lifted", "route", "path",
 )
+REVERSE_OUT_STEPS = 3              # remote-control reverse nudges to back off a trap
+REVERSE_OUT_VELOCITY = -110       # straight reverse (negative), retracing the entry route
 MAX_RECOVER_ATTEMPTS = 3            # per run, before giving up and docking
 RECOVER_FREE_TIMEOUT = 90          # seconds to wait for it to free itself
 NOGO_HALF_MM = 300                 # half-size of the temp no-go box around the stuck point (30 cm)
@@ -354,6 +356,22 @@ class SchedulerEngine:
         except Exception as exc:  # noqa: BLE001
             _LOGGER.warning("auto-recover: clearing temp no-go failed: %s", exc)
 
+    async def _reverse_out(self, steps: int = REVERSE_OUT_STEPS,
+                           velocity: int = REVERSE_OUT_VELOCITY) -> None:
+        """Back the robot straight out the way it came — the primitive that
+        reliably frees a wedge when return_to_base alone keeps ramming the
+        blocked path forward. Verified live 2026-07-13: a `route` error at a rug
+        lip cleared after a few reverse nudges. No vacuuming, minimal battery."""
+        for _ in range(max(1, steps)):
+            try:
+                await self._svc("dreame_vacuum", "vacuum_remote_control_move_step",
+                                {"entity_id": self._vacuum_entity,
+                                 "rotation": 0, "velocity": velocity})
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.warning("auto-recover: reverse step failed: %s", exc)
+                return
+            await asyncio.sleep(1.0)
+
     async def _maybe_auto_recover(self, run: dict, now: datetime) -> bool:
         """Unstick a wedged robot and CARRY ON cleaning (avoiding the spot),
         rather than docking. Returns True if it handled this tick.
@@ -420,8 +438,12 @@ class SchedulerEngine:
         run["recover_started"] = now.isoformat()
         run["errored"] = True
         await self.tracker.async_set_active_run(run)
-        # return_to_base triggers the robot's own reverse-out recovery (verified
-        # live 2026-07-07: it woke, cleared forward_suffocate, and drove out).
+        # Reverse out first — back off the trap the way it came in. return_to_base
+        # alone kept ramming the blocked path forward (live 2026-07-13: a route
+        # error at a rug lip); a straight reverse retraces the entry route and
+        # frees it. Then hand off to return_to_base, which continues the robot's
+        # own reverse-out recovery and re-localises (verified 2026-07-07 + 07-13).
+        await self._reverse_out()
         await self._svc("vacuum", "return_to_base", {"entity_id": self._vacuum_entity})
         if bool(self._opt(OPT_NOTIFY_STUCK, DEFAULT_NOTIFY_STUCK)):
             await self._notify(
