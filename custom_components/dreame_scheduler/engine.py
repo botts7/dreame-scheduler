@@ -950,8 +950,11 @@ class SchedulerEngine:
             return
 
         # Someone came home mid-run → retreat to the dock so we don't annoy them.
-        # (Manual runs opt out via kind == "manual".)
-        if (run.get("kind") != "manual" and not run.get("interrupting")
+        # Manual runs opt out (user tapped "clean now") — EXCEPT once a run has
+        # docked to recharge and auto-resumed: that "clean now" intent is stale
+        # hours later, so a recharge-resumed manual run steps aside like any other.
+        if ((run.get("kind") != "manual" or run.get("was_parked"))
+                and not run.get("interrupting")
                 and bool(self._opt(OPT_RETURN_ON_ARRIVAL, DEFAULT_RETURN_ON_ARRIVAL))
                 and bool(self._opt(OPT_REQUIRE_AWAY, DEFAULT_REQUIRE_AWAY))
                 and self._presence_home() is True):
@@ -1065,6 +1068,7 @@ class SchedulerEngine:
                     and not run.get("interrupting")):
                 if not run.get("parked_since"):
                     run["parked_since"] = now.isoformat()
+                    run["was_parked"] = True   # recharge/dock mid-task; presence exemption ends on resume
                     await self.tracker.async_set_active_run(run)
                 parked = _parse_iso(run.get("parked_since"))
                 dwell = (now - parked).total_seconds() if parked else 0
@@ -1096,6 +1100,7 @@ class SchedulerEngine:
         # failed-to-start if it never became active.
         if not run.get("parked_since"):
             run["parked_since"] = now.isoformat()
+            run["was_parked"] = True   # parked mid-task; presence exemption ends on resume
             await self.tracker.async_set_active_run(run)
         parked = _parse_iso(run.get("parked_since"))
         dwell = (now - parked).total_seconds() if parked else 0
