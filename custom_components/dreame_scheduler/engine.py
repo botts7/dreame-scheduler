@@ -449,6 +449,7 @@ class SchedulerEngine:
             await self._notify(
                 "🛟 Vacuum recovering",
                 f"Got stuck near {where} — walled off the spot and freeing it to carry on.",
+                high_priority=True,
             )
         _LOGGER.info("auto-recover: attempt %s near %s at %s", run["recover_count"], where, pos)
         return True
@@ -902,6 +903,7 @@ class SchedulerEngine:
                         await self._notify(
                             "⚠️ Vacuum needs help",
                             f"The robot errored near {where} while paused for someone being home.",
+                            high_priority=True,
                         )
             return
 
@@ -981,7 +983,15 @@ class SchedulerEngine:
             if not run.get("errored"):
                 run["errored"] = True
                 changed = True
-            if not run.get("notified_stuck"):
+            # Only cry "needs help" once auto-recover has genuinely given up (it's
+            # off, or all attempts are spent). While it still has attempts the
+            # recovering notice covers it -- a needs-help here just because one
+            # free-timeout elapsed is a false alarm (reverse-out often frees it
+            # shortly after). Verified live 2026-07-13: a double-notify (recover +
+            # needs-help) fired for one wedge that then self-healed fine.
+            recover_done = (not bool(self._opt(OPT_AUTO_RECOVER, DEFAULT_AUTO_RECOVER))
+                            or int(run.get("recover_count", 0)) >= MAX_RECOVER_ATTEMPTS)
+            if recover_done and not run.get("notified_stuck"):
                 run["notified_stuck"] = True
                 changed = True
                 if bool(self._opt(OPT_NOTIFY_STUCK, DEFAULT_NOTIFY_STUCK)):
@@ -989,6 +999,7 @@ class SchedulerEngine:
                     await self._notify(
                         "⚠️ Vacuum needs help",
                         f"The robot reported an error near {where} during the {run['kind']} clean.",
+                        high_priority=True,
                     )
             if changed:
                 await self.tracker.async_set_active_run(run)
@@ -1482,7 +1493,14 @@ class SchedulerEngine:
         if self._notify_update:
             self._notify_update()
 
-    async def _notify(self, title: str, message: str) -> None:
+    async def _notify(self, title: str, message: str, high_priority: bool = False) -> None:
+        # high_priority asks the mobile app to bypass Android Doze / iOS batching
+        # so a stuck/needs-help alert arrives now, not 30+ min later. Harmless on
+        # persistent_notification, which just ignores the extra data.
+        extra = {}
+        if high_priority:
+            extra = {"data": {"ttl": 0, "priority": "high",
+                              "push": {"interruption-level": "time-sensitive"}}}
         for name in self._notify_names():
             try:
                 if name == "persistent_notification":
@@ -1494,7 +1512,7 @@ class SchedulerEngine:
                     )
                 else:
                     await self.hass.services.async_call(
-                        "notify", name, {"title": title, "message": message}, blocking=False
+                        "notify", name, {"title": title, "message": message, **extra}, blocking=False
                     )
             except Exception as err:  # noqa: BLE001 — never let a bad notify target break the run
                 _LOGGER.warning("dreame_scheduler: notify '%s' failed: %s", name, err)
