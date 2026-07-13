@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import datetime, timedelta
 
 from homeassistant.config_entries import ConfigEntry
@@ -168,6 +169,7 @@ _RECOVERABLE_ERROR_WORDS = (
 MAX_RECOVER_ATTEMPTS = 3            # per run, before giving up and docking
 RECOVER_FREE_TIMEOUT = 90          # seconds to wait for it to free itself
 NOGO_HALF_MM = 300                 # half-size of the temp no-go box around the stuck point (30 cm)
+MIN_AREA_PER_ROOM_M2 = 2.0         # a run sweeping less than this per dispatched room didn't really clean
 
 
 class SchedulerEngine:
@@ -1099,6 +1101,14 @@ class SchedulerEngine:
         cleaned, skipped = [], []
         visited = set(run.get("visited", []))
         error_active = self._error_active()
+        # Area sanity: a run that swept an implausibly small total area didn't
+        # really clean, even if the record says "completed" (e.g. it left the
+        # dock, cleaned ~1 sq m, and returned). Don't bank rooms on the trusted-
+        # pass path in that case; require we actually saw the robot enter them.
+        run_area = _parse_area(record.get("cleaned_area") if record else None)
+        too_small = run_area is not None and run_area < max(1.0, len(targets) * MIN_AREA_PER_ROOM_M2)
+        if too_small:
+            _LOGGER.debug("run swept only %.1f sq m for %d rooms; not crediting the trusted-pass path", run_area, len(targets))
         for seg in targets:
             name = seg_names.get(seg)
             seen = bool(visited and name and name in visited)
@@ -1109,7 +1119,7 @@ class SchedulerEngine:
             elif interrupted:
                 (cleaned if seen else skipped).append(seg)
             elif (record is not None and record.get("completed") is not False
-                    and not error_active and not run.get("errored")):
+                    and not error_active and not run.get("errored") and not too_small):
                 cleaned.append(seg)                     # trusted full pass
             elif seen:
                 cleaned.append(seg)                     # abnormal end, but seen
@@ -1486,3 +1496,13 @@ def _parse_iso(value: str | None) -> datetime | None:
         return dt_util.parse_datetime(value)
     except (TypeError, ValueError):
         return None
+
+
+def _parse_area(value) -> float | None:
+    """Best-effort parse of a cleaned-area value like '12 m2' or 12.5 -> float."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    m = re.search(r"\d+(?:\.\d+)?", str(value))
+    return float(m.group()) if m else None
