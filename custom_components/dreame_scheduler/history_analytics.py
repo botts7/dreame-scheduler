@@ -49,6 +49,18 @@ def last_fail_reason(history: list, seg: str) -> str | None:
     return None
 
 
+def last_cleaned_ts(history: list, seg: str) -> str | None:
+    """ISO timestamp of the most recent run in which this room was CONFIRMED
+    cleaned, from the persistent history log (survives weekly resets, unlike the
+    week counters). None if it has never been cleaned in the log — which, for a
+    scheduled room, is itself a strong 'the robot can't do this one' signal."""
+    for entry in reversed(history):
+        r = _room(entry, seg)
+        if r is not None and r.get("status") == "cleaned":
+            return entry.get("ts")
+    return None
+
+
 def weekday_stats(history: list, seg: str) -> dict:
     """Per-weekday {"attempts", "cleaned"} counts for a room."""
     stats = {d: {"attempts": 0, "cleaned": 0} for d in range(7)}

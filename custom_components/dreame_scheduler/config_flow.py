@@ -19,6 +19,9 @@ from .const import (
     CONF_PREFIX,
     CONF_VACUUM_ENTITY,
     DEFAULT_AWAY_GRACE_MIN,
+    DEFAULT_DOOR_RETRY_ENABLED,
+    DEFAULT_DOOR_RETRY_MIN,
+    DEFAULT_DOOR_RETRY_WHILE_HOME,
     DEFAULT_CATCHUP_DAY,
     DEFAULT_CATCHUP_ENABLED,
     DEFAULT_CATCHUP_TIME,
@@ -42,6 +45,9 @@ from .const import (
     DOMAIN,
     MAX_SEGMENTS,
     OPT_AWAY_GRACE_MIN,
+    OPT_DOOR_RETRY_ENABLED,
+    OPT_DOOR_RETRY_MIN,
+    OPT_DOOR_RETRY_WHILE_HOME,
     OPT_CATCHUP_DAY,
     OPT_CATCHUP_ENABLED,
     OPT_CATCHUP_TIME,
@@ -72,6 +78,7 @@ from .const import (
     ROOM_DOOR_SENSOR,
     ROOM_ENABLED,
     ROOM_MODE,
+    ROOM_MOP_EVERY,
     ROOM_REPEATS,
     ROOM_SUCTION,
     ROOM_WETNESS,
@@ -216,8 +223,9 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
     # -------- presence & notifications --------
     async def async_step_presence(self, user_input=None):
         if user_input is not None:
-            # NumberSelector returns floats; normalise grace to int.
+            # NumberSelector returns floats; normalise to int.
             user_input[OPT_AWAY_GRACE_MIN] = int(user_input.get(OPT_AWAY_GRACE_MIN, DEFAULT_AWAY_GRACE_MIN))
+            user_input[OPT_DOOR_RETRY_MIN] = int(user_input.get(OPT_DOOR_RETRY_MIN, DEFAULT_DOOR_RETRY_MIN))
             return self._save(user_input)
 
         try:  # 2025.x preferred API; fall back for older cores
@@ -233,6 +241,10 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     domain=["person", "device_tracker", "group", "binary_sensor"], multiple=True)),
             vol.Optional(OPT_AWAY_GRACE_MIN, default=self._opt(OPT_AWAY_GRACE_MIN, DEFAULT_AWAY_GRACE_MIN)): selector.NumberSelector(
                 selector.NumberSelectorConfig(min=0, max=120, step=1, unit_of_measurement="min", mode=selector.NumberSelectorMode.BOX)),
+            vol.Optional(OPT_DOOR_RETRY_ENABLED, default=self._opt(OPT_DOOR_RETRY_ENABLED, DEFAULT_DOOR_RETRY_ENABLED)): selector.BooleanSelector(),
+            vol.Optional(OPT_DOOR_RETRY_MIN, default=self._opt(OPT_DOOR_RETRY_MIN, DEFAULT_DOOR_RETRY_MIN)): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=1, max=180, step=1, unit_of_measurement="min", mode=selector.NumberSelectorMode.BOX)),
+            vol.Optional(OPT_DOOR_RETRY_WHILE_HOME, default=self._opt(OPT_DOOR_RETRY_WHILE_HOME, DEFAULT_DOOR_RETRY_WHILE_HOME)): selector.BooleanSelector(),
             vol.Optional(OPT_NOTIFY_TARGETS, default=self._opt(OPT_NOTIFY_TARGETS, ["persistent_notification"])): selector.SelectSelector(
                 selector.SelectSelectorConfig(options=notify_options, multiple=True, custom_value=True,
                                               mode=selector.SelectSelectorMode.DROPDOWN)),
@@ -277,6 +289,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             wet = user_input.get(ROOM_WETNESS)
             if wet not in (None, ""):
                 entry[ROOM_WETNESS] = int(wet)
+            # Mop cadence: 1 = mop on every clean (off), 2 = every 2nd day, ...
+            entry[ROOM_MOP_EVERY] = int(user_input.get(ROOM_MOP_EVERY, 1) or 1)
             rooms_cfg[seg] = entry
             return self._save({OPT_ROOMS: rooms_cfg})
 
@@ -295,6 +309,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             vol.Optional(ROOM_MODE, default=cur.get(ROOM_MODE, "")): mode_sel,
             vol.Optional(ROOM_SUCTION, default=cur.get(ROOM_SUCTION, "")): suction_sel,
             vol.Optional(ROOM_WETNESS, default=str(cur.get(ROOM_WETNESS, "") or "")): selector.TextSelector(),
+            vol.Optional(ROOM_MOP_EVERY, default=int(cur.get(ROOM_MOP_EVERY, 1) or 1)): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=1, max=7, step=1, mode=selector.NumberSelectorMode.BOX)),
             vol.Optional(ROOM_REPEATS, default=cur.get(ROOM_REPEATS, 1)): selector.NumberSelector(
                 selector.NumberSelectorConfig(min=1, max=3, step=1, mode=selector.NumberSelectorMode.BOX)),
         }

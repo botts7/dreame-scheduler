@@ -21,7 +21,7 @@ Room config shape (per segment-id string), as stored in entry.options[rooms]:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 
 def _enabled_rooms(rooms: dict) -> dict:
@@ -57,6 +57,114 @@ def pending_rooms(rooms: dict, cleaned: dict | set | list) -> list[str]:
 def all_enabled_segments(rooms: dict) -> list[str]:
     """Every enabled segment-id, sorted — the target of the weekly guarantee."""
     return sorted(_enabled_rooms(rooms).keys(), key=_seg_sort_key)
+
+
+SWEEP_ONLY_MODE = "sweeping"
+
+
+def is_mopping_mode(mode) -> bool:
+    """True if a cleaning-mode option involves mopping (mopping / sweeping and
+    mopping / mopping after sweeping / ...). Sweep-only modes return False."""
+    return "mop" in str(mode or "").lower()
+
+
+def advance_mop_cadence(
+    base_mode, mop_every, prev_count, prev_date, today_iso: str
+) -> tuple[int, str, bool]:
+    """Resolve a room's cleaning mode for THIS run under the "mop every N
+    sweep-days" cadence, and advance its per-room sweep-day counter.
+
+    The user's model (from the community request): a room sweeps on each of its
+    scheduled days, and mops only every Nth of those days — e.g. N=2 → sweep
+    daily, mop-after-sweep every second day. N<=1 means "mop on every clean"
+    (feature off), so the base mode is used unchanged.
+
+    Counting is per CALENDAR DAY, not per dispatch: a run resumed after an
+    interruption, or a manual clean-now, lands on the same date and must not
+    advance the cadence twice. ``prev_count``/``prev_date`` are the room's stored
+    counter and the date it last advanced; ``today_iso`` is today's local date.
+
+    Returns ``(new_count, mode_for_this_run, will_mop)``:
+      * new_count — the room's counter after this run (unchanged if already
+        counted today).
+      * mode_for_this_run — the base mode on a mop day, else ``"sweeping"``.
+      * will_mop — whether this run mops.
+
+    A non-mopping base mode (or N<=1) is returned verbatim with the counter
+    still ticked once per day, so toggling N later stays phase-stable.
+    """
+    base = str(base_mode or "")
+    try:
+        n = int(mop_every)
+    except (TypeError, ValueError):
+        n = 1
+    # Advance once per calendar day; a same-day re-dispatch keeps the count.
+    count = int(prev_count or 0)
+    if prev_date != today_iso:
+        count += 1
+    if not is_mopping_mode(base) or n <= 1:
+        return count, base, is_mopping_mode(base)
+    will_mop = (count % n == 0)
+    return count, (base if will_mop else SWEEP_ONLY_MODE), will_mop
+
+
+def door_open_long_enough(
+    state, last_changed, now, mins, *, open_states=("on", "open")
+) -> bool:
+    """True if a door/contact sensor reads OPEN and has held that state for at
+    least ``mins`` minutes.
+
+    This is the safety signal behind the opt-in "retry a door-skipped room once
+    its door reopens" feature: a door that has been open a good while means the
+    room is very likely empty (nobody showering / using it), so it's safe to
+    send the robot in — even while someone's home, if the user opted into that.
+
+    ``last_changed``/``now`` are tz-aware datetimes. A closed/unknown state, a
+    missing timestamp, or unparseable arithmetic all return False — we never
+    retry on a signal we can't trust.
+    """
+    if str(state or "").lower() not in open_states:
+        return False
+    if last_changed is None or now is None:
+        return False
+    try:
+        elapsed = (now - last_changed).total_seconds()
+    except (TypeError, ValueError):
+        return False
+    return elapsed >= float(mins) * 60
+
+
+def _date_of(ts) -> date | None:
+    """Local date an ISO timestamp falls on, or None if unparseable. Stored
+    clean timestamps carry the local offset, so ``.date()`` is already the
+    local calendar day."""
+    try:
+        return datetime.fromisoformat(ts).date()
+    except (TypeError, ValueError):
+        return None
+
+
+def cleaned_today(cleaned: dict | set | list, today: date) -> set:
+    """Segment-ids confirmed cleaned on ``today``.
+
+    The DAILY schedule de-dups on this, NOT on 'cleaned at all this week'. A room
+    the user ticked for several weekdays (Mon+Thu, or every day) must clean on
+    each of those days; keying the skip on the whole week silently collapses it
+    to a single weekly clean (every day after the first never fires). This only
+    ever stops a *same-day* double-run — a different scheduled day is untouched.
+
+    The weekly whole-house catch-up still uses the coarser 'done this week'
+    (``pending_rooms``) — that guarantee is per-week by design.
+
+    Only a dict carries the per-room timestamps needed to tell which day a clean
+    happened; a bare set/list can't, so every member counts as done (preserving
+    the prior behaviour for those callers). An unparseable timestamp counts as
+    'not today', so a room still gets its scheduled clean rather than being
+    skipped forever on one bad value.
+    """
+    if not isinstance(cleaned, dict):
+        return set(cleaned)
+    return {seg for seg, ts in cleaned.items() if _date_of(ts) == today}
 
 
 def week_start_for(day: date, week_start_day: int) -> date:
@@ -126,10 +234,12 @@ def choose_dispatch(
         and day_dispatched_on != today_iso
     ):
         due = rooms_due_today(rooms, weekday)
-        # Drop rooms already confirmed cleaned this week (a catch-up or a manual
-        # run may have covered them already) — no point redoing them today.
-        done = set(cleaned.keys()) if isinstance(cleaned, dict) else set(cleaned)
-        due = [s for s in due if s not in done]
+        # Drop rooms already cleaned TODAY (an earlier manual/auto run covered
+        # them) — but NOT rooms merely cleaned earlier this week, or a room the
+        # user ticked for several days would only ever clean on the first of
+        # them. The schedule must follow the ticked days (up to every day).
+        done_today = cleaned_today(cleaned, now_date)
+        due = [s for s in due if s not in done_today]
         if due:
             return Decision(action="dispatch", kind="daily", segments=due,
                             reason=f"daily schedule for {today_iso}")

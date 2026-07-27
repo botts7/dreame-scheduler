@@ -3,6 +3,65 @@
 All notable changes to the Dreame Scheduler integration and its companion
 add-on are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] — 2026-07-27
+
+A big feature + reliability release: the scheduler now heals itself when the
+robot gets stuck, keeps an honest list of rooms it can't reach, and gives you
+finer control over how and when each room is cleaned.
+
+### Integration (`custom_components/dreame_scheduler`)
+
+**Self-healing recovery.** When the robot gets into trouble mid-clean the
+scheduler tries to fix it and carry on instead of leaving it stranded:
+- Reverses out of a wedge and resumes, re-routing around the spot; route/path
+  errors are now treated as recoverable.
+- Detects a beaching / high-centre (drive wheels off the floor) — where no
+  command can help — and asks for a hand instead of grinding through futile
+  retries.
+- Treats an obstruction as a moment, not a wall: it resumes and lets the robot
+  re-plan rather than fencing off good floor.
+- Puts the robot's own photo of the obstacle in the alert so you can see what
+  stopped it.
+- Silent-stuck and stranded watchdogs catch a robot that stopped moving with no
+  error, or was left away from the dock after a run, and notify you.
+- Wakes a deep-'sleeping' robot that would otherwise ignore a dispatch.
+
+**Recurring-trap learner.** Learns where the robot repeatedly gets stuck across
+separate runs, tells fixed hazards (worth walling off) apart from path blocks
+(not), and suggests a permanent no-go zone for one-tap approval — it never walls
+off floor on its own.
+
+**Clean-by-hand list.** Rooms the robot genuinely can't reach for weeks become a
+Home Assistant to-do list, and clear themselves when the room is next cleaned.
+
+**Scheduling.**
+- Rooms scheduled on several weekdays now clean on **each** of those days — fixes
+  multi-day rooms that were silently collapsing to a single weekly clean.
+- **Mop every N sweeps** (per room): sweep every scheduled day and mop-after-
+  sweep every 2nd/3rd/… day, so damp-mopping needn't happen every time.
+- **Door-retry** (opt-in): a room skipped for a shut door is retried the same day
+  once its door has been open long enough to be sure the room is free — away-only,
+  or while-home if you trust the open-timer.
+
+**Reliability.** Recovery resumes only the run's own rooms (never a stray whole-
+house clean); the robot is reined in if it wanders into rooms it wasn't sent to;
+a run that swept implausibly little area isn't credited as done; a manual "clean
+now" that merely parks isn't hijacked; the stale-house nudge is gated to daytime;
+and mojibake in notification text is fixed.
+
+**Labs (opt-in).** "Show me where I'm stuck" — the robot drives to an unreachable
+room and signals there so you can find the blockage.
+
+### Add-on (Dreame Scheduler panel)
+- Clean-by-hand list and one-tap trap-learner **Apply** in the GUI.
+- **Send test notification** button, and a warning for rooms scheduled on no days.
+- Branding: wordmark banner as the store logo; Roboto bundled locally so the UI
+  font loads correctly through ingress.
+
+### Project
+- CI: `actions/checkout` v4 → v7 (clears the Node 20 deprecation).
+- Added GitHub issue templates (bug report + feature request).
+
 ## [0.1.1] — 2026-07-10
 
 Branding and packaging release — no behaviour changes.

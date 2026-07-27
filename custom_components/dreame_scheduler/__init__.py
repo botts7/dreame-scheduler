@@ -12,7 +12,7 @@ import logging
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.helpers import config_validation as cv
 
 from homeassistant.exceptions import ConfigEntryNotReady
@@ -24,7 +24,7 @@ from .report import async_register_report_service
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.SWITCH, Platform.SENSOR, Platform.BUTTON]
+PLATFORMS: list[Platform] = [Platform.SWITCH, Platform.SENSOR, Platform.BUTTON, Platform.TODO]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -97,6 +97,18 @@ def _async_register_services(hass: HomeAssistant) -> None:
         for eng in _engines(call):
             await eng.async_clean_rooms(segs, quiet=bool(call.data.get("quiet", False)))
 
+    async def _apply_learned_nogo(call: ServiceCall) -> dict:
+        key = call.data.get("key")
+        results = []
+        for eng in _engines(call):
+            results.append(await eng.async_apply_learned_nogo(key))
+        return {"results": results}
+
+    async def _show_unreachable(call: ServiceCall) -> None:
+        seg = call.data.get("segment")
+        for eng in _engines(call):
+            await eng.async_show_unreachable(str(seg) if seg is not None else None)
+
     quiet_schema = vol.Schema({
         vol.Optional("quiet", default=False): cv.boolean,
         vol.Optional("vacuum"): cv.string,
@@ -109,3 +121,12 @@ def _async_register_services(hass: HomeAssistant) -> None:
         vol.Required("segments"): list, vol.Optional("quiet", default=False): cv.boolean,
         vol.Optional("vacuum"): cv.string,
     }))
+    hass.services.async_register(
+        DOMAIN, "apply_learned_nogo", _apply_learned_nogo,
+        schema=vol.Schema({vol.Optional("key"): cv.string, vol.Optional("vacuum"): cv.string}),
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN, "show_unreachable", _show_unreachable,
+        schema=vol.Schema({vol.Optional("segment"): cv.string, vol.Optional("vacuum"): cv.string}),
+    )

@@ -5,7 +5,7 @@ Run: python tests/test_logic.py   (no Home Assistant install needed)
 import importlib.util
 import os
 import sys
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 BASE = os.path.join(os.path.dirname(__file__), "..", "custom_components", "dreame_scheduler")
 
@@ -94,6 +94,73 @@ d4 = sc.choose_dispatch(now_date=date(2026, 7, 11), weekday=5, now_min=610, room
                         daily_time_min=None, day_dispatched_on="2026-07-11", catchup_enabled=True, catchup_day=5,
                         catchup_time_min=600, catchup_dispatched_on=None)
 check("catch-up fires Sat with pending [2,3]", d4.action == "dispatch" and d4.kind == "catchup" and d4.segments == ["2", "3"])
+
+# ---- multi-day rooms must clean on EACH ticked day, not once per week ----
+# A room ticked Mon+Thu, cleaned on its Monday slot, is due again Thursday.
+md = {"1": {"enabled": True, "days": [0, 3]}}          # Mon + Thu
+d5 = sc.choose_dispatch(now_date=date(2026, 7, 23), weekday=3, now_min=610, rooms=md,
+                        cleaned={"1": "2026-07-20T10:30:00+10:00"},  # cleaned Monday
+                        daily_time_min=600, day_dispatched_on=None, catchup_enabled=True, catchup_day=5,
+                        catchup_time_min=600, catchup_dispatched_on=None)
+check("Mon+Thu room re-cleans Thu (Mon-cleaned)", d5.action == "dispatch" and d5.segments == ["1"])
+# ...but not twice on the same day.
+d6 = sc.choose_dispatch(now_date=date(2026, 7, 23), weekday=3, now_min=610, rooms=md,
+                        cleaned={"1": "2026-07-23T08:00:00+10:00"},  # already cleaned today
+                        daily_time_min=600, day_dispatched_on=None, catchup_enabled=True, catchup_day=5,
+                        catchup_time_min=600, catchup_dispatched_on=None)
+check("no second clean same day (cleaned today)", d6.action == "idle")
+# An every-day room cleans every day (Tue, having last cleaned Mon).
+ed = {"1": {"enabled": True, "days": [0, 1, 2, 3, 4, 5, 6]}}
+d7 = sc.choose_dispatch(now_date=date(2026, 7, 21), weekday=1, now_min=610, rooms=ed,
+                        cleaned={"1": "2026-07-20T10:30:00+10:00"},  # cleaned yesterday (Mon)
+                        daily_time_min=600, day_dispatched_on=None, catchup_enabled=True, catchup_day=5,
+                        catchup_time_min=600, catchup_dispatched_on=None)
+check("every-day room cleans again next day", d7.action == "dispatch" and d7.segments == ["1"])
+
+# ---- mop-every-N cadence (per-room) ----
+check("is_mopping_mode: sweeping is False", sc.is_mopping_mode("sweeping") is False)
+check("is_mopping_mode: mopping_after_sweeping True", sc.is_mopping_mode("mopping_after_sweeping") is True)
+check("is_mopping_mode: sweeping_and_mopping True", sc.is_mopping_mode("sweeping_and_mopping") is True)
+check("is_mopping_mode: None False", sc.is_mopping_mode(None) is False)
+# N=2, base mops: day 1 sweeps only, day 2 mops (Anton's example).
+c1, m1, w1 = sc.advance_mop_cadence("mopping_after_sweeping", 2, None, None, "2026-07-20")
+check("cadence N=2 day1 -> sweep only", (c1, m1, w1) == (1, "sweeping", False))
+c2, m2, w2 = sc.advance_mop_cadence("mopping_after_sweeping", 2, 1, "2026-07-20", "2026-07-21")
+check("cadence N=2 day2 -> mop", (c2, m2, w2) == (2, "mopping_after_sweeping", True))
+c3, m3, w3 = sc.advance_mop_cadence("mopping_after_sweeping", 2, 2, "2026-07-21", "2026-07-22")
+check("cadence N=2 day3 -> sweep only", (c3, m3, w3) == (3, "sweeping", False))
+# Same calendar day (resume / manual) must NOT advance the counter.
+c4, m4, w4 = sc.advance_mop_cadence("mopping_after_sweeping", 2, 1, "2026-07-20", "2026-07-20")
+check("cadence same-day resume keeps count", (c4, m4, w4) == (1, "sweeping", False))
+# N=1 (off) leaves the base mode untouched.
+c5, m5, w5 = sc.advance_mop_cadence("sweeping_and_mopping", 1, None, None, "2026-07-20")
+check("cadence N=1 -> base mode, mops", (m5, w5) == ("sweeping_and_mopping", True))
+# Non-mopping base is returned verbatim regardless of N.
+c6, m6, w6 = sc.advance_mop_cadence("sweeping", 3, None, None, "2026-07-20")
+check("cadence non-mop base stays sweeping", (m6, w6) == ("sweeping", False))
+# Every-3rd-day cadence lands the mop on day 3.
+seq = []
+pc, pd = None, None
+for i, day in enumerate(["2026-07-20", "2026-07-21", "2026-07-22", "2026-07-23"]):
+    pc, mode, will = sc.advance_mop_cadence("mopping", 3, pc, pd, day)
+    pd = day
+    seq.append(will)
+check("cadence N=3 mops on day 3 only", seq == [False, False, True, False])
+
+# ---- door_open_long_enough (retry-when-door-reopens) ----
+_now = datetime(2026, 7, 25, 12, 0, 0, tzinfo=timezone.utc)
+check("door open 40min >= 30 -> retry",
+      sc.door_open_long_enough("on", _now - timedelta(minutes=40), _now, 30) is True)
+check("door open 20min < 30 -> no",
+      sc.door_open_long_enough("on", _now - timedelta(minutes=20), _now, 30) is False)
+check("door open exactly 30 -> retry",
+      sc.door_open_long_enough("open", _now - timedelta(minutes=30), _now, 30) is True)
+check("door closed -> no",
+      sc.door_open_long_enough("off", _now - timedelta(minutes=40), _now, 30) is False)
+check("door open but no timestamp -> no",
+      sc.door_open_long_enough("open", None, _now, 30) is False)
+check("door unknown state -> no",
+      sc.door_open_long_enough("unavailable", _now - timedelta(minutes=40), _now, 30) is False)
 
 # ---- history_analytics ----
 _cl = lambda: {"status": "cleaned"}

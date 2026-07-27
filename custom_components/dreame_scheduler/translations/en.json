@@ -58,6 +58,9 @@
           "require_away": "Only clean when no one is home",
           "presence_entities": "People / trackers that mean 'home'",
           "away_grace_min": "Wait this long after everyone leaves",
+          "door_retry_enabled": "Retry a door-skipped room when its door reopens",
+          "door_retry_min": "Door must be open this long before retrying",
+          "door_retry_while_home": "Allow that retry even when someone's home (trusts the open-time)",
           "notify_targets": "Notification targets",
           "notify_stuck": "Notify if the robot gets stuck",
           "notify_skipped": "Notify when rooms are skipped",
@@ -80,6 +83,7 @@
           "mode": "Cleaning mode (blank = default)",
           "suction": "Suction (blank = default)",
           "wetness": "Mop wetness (blank = default)",
+          "mop_every": "Mop every N sweeps (1 = mop every clean, 2 = every 2nd day, …)",
           "repeats": "Passes",
           "door_sensor": "Door sensor (optional — skip when closed)"
         }

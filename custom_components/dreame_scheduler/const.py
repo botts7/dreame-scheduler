@@ -53,10 +53,27 @@ OPT_VACUUM_BEFORE_MOP: Final = "vacuum_before_mop"    # sweep whole area, then m
 # with a temporary no-go, free it, and carry on the clean instead of docking.
 OPT_AUTO_RECOVER: Final = "auto_recover"
 
+# Silence the robot's own voice prompts WHILE the engine is driving a controlled
+# maneuver (reverse-out / re-route), then restore. Stops it announcing "unable to
+# reach specified area" etc. on repeat during our interventions; normal cleaning
+# keeps its voice. Passive faults (a beaching) stay audible.
+OPT_QUIET_RECOVERY: Final = "quiet_recovery"
+
 # Stale-house nudge + quiet mode
 OPT_STALE_NUDGE_ENABLED: Final = "stale_nudge_enabled"
 OPT_STALE_AFTER_DAYS: Final = "stale_after_days"      # days since last clean before nudging
 OPT_QUIET_SUCTION: Final = "quiet_suction"            # suction option used for quiet runs
+
+# Pre-run "tidy the room" heads-up: notify BEFORE the robot goes out so loose
+# pet toys / cables can be cleared (the only reliable defence against mobile
+# obstacles it can't map — see trap_learner). Trigger fits the user's routine:
+#   OPT_PRERUN_MODE = "morning"        -> at OPT_PRERUN_TIME, today's rooms
+#                     "evening_before" -> at OPT_PRERUN_TIME, tomorrow's rooms
+#                     "lead"           -> OPT_PRERUN_LEAD_MIN before the daily time
+OPT_PRERUN_ENABLED: Final = "prerun_enabled"
+OPT_PRERUN_MODE: Final = "prerun_mode"
+OPT_PRERUN_TIME: Final = "prerun_time"               # "HH:MM" (morning / evening_before)
+OPT_PRERUN_LEAD_MIN: Final = "prerun_lead_min"       # minutes before the daily time (lead)
 
 # Notifications
 OPT_NOTIFY_TARGETS: Final = "notify_targets"         # list[str] notify service names (no "notify." prefix)
@@ -92,6 +109,25 @@ OPT_VIEWROT: Final = "viewrot"
 OPT_STUDIO_ENABLED: Final = "studio_enabled"
 OPT_USER_PLAN: Final = "user_plan"
 
+# Manual-clean to-do: when the robot persistently CAN'T finish a scheduled room
+# (unreachable — couch-blocked, always-shut door), surface it as a to-do task on
+# an integration-owned to-do list so the user cleans it by hand and the house is
+# actually clean. Auto-clears when the room next gets cleaned (robot or user).
+# (Syncing to a user's OWN external to-do list is a later extension.)
+OPT_MANUAL_CLEAN_ENABLED: Final = "manual_clean_enabled"
+OPT_MANUAL_CLEAN_STALE_DAYS: Final = "manual_clean_stale_days"   # days since last clean
+OPT_MANUAL_CLEAN_MIN_MISSES: Final = "manual_clean_min_misses"   # consecutive misses
+OPT_MANUAL_CLEAN_NOTIFY: Final = "manual_clean_notify"           # also push a notification
+
+# LAB (experimental): the robot physically shows you where it's stuck — drives to
+# the edge of a room it can't reach, then signals "clean here for me" (a locate
+# beep + fill-light + a notification). Opt-in; it sends the robot toward the
+# blocked area, so it's Labs-gated.
+OPT_SHOW_UNREACHABLE: Final = "show_unreachable"
+OPT_DOOR_RETRY_ENABLED: Final = "door_retry_enabled"        # retry a door-skipped room once its door reopens
+OPT_DOOR_RETRY_MIN: Final = "door_retry_min"                # minutes the door must be open before retrying
+OPT_DOOR_RETRY_WHILE_HOME: Final = "door_retry_while_home"  # allow that retry even when someone's home
+
 ROOM_ENABLED: Final = "enabled"
 ROOM_DAYS: Final = "days"
 ROOM_MODE: Final = "mode"
@@ -99,6 +135,7 @@ ROOM_SUCTION: Final = "suction"
 ROOM_WETNESS: Final = "wetness"
 ROOM_REPEATS: Final = "repeats"
 ROOM_DOOR_SENSOR: Final = "door_sensor"
+ROOM_MOP_EVERY: Final = "mop_every"     # mop every Nth sweep-day (1=every clean, 2=every 2nd, ...)
 
 # ---- defaults ----
 DEFAULT_REQUIRE_AWAY: Final = True
@@ -119,12 +156,26 @@ DEFAULT_NOTIFY_STUCK: Final = True
 DEFAULT_NOTIFY_SKIPPED: Final = True
 DEFAULT_NOTIFY_WEEKLY: Final = True
 DEFAULT_VACUUM_BEFORE_MOP: Final = False
+DEFAULT_ROOM_MOP_EVERY: Final = 1       # per-room mop cadence: 1 = mop on every clean (off)
+DEFAULT_DOOR_RETRY_ENABLED: Final = False   # opt-in: don't retry door-skipped rooms early unless asked
+DEFAULT_DOOR_RETRY_MIN: Final = 30          # door open this long => room likely clear, safe to retry
+DEFAULT_DOOR_RETRY_WHILE_HOME: Final = False  # away-only by default; opt-in to trust the open-timer at home
 DEFAULT_AUTO_RECOVER: Final = True
+DEFAULT_QUIET_RECOVERY: Final = True
 DEFAULT_MAP_RESUME: Final = False       # beta; default to safe whole-room resume
 DEFAULT_RETURN_ON_ARRIVAL: Final = True
 DEFAULT_RESUME_WHEN_AWAY: Final = True
 DEFAULT_STALE_NUDGE_ENABLED: Final = True
 DEFAULT_STALE_AFTER_DAYS: Final = 3
+DEFAULT_MANUAL_CLEAN_ENABLED: Final = True
+DEFAULT_MANUAL_CLEAN_STALE_DAYS: Final = 7
+DEFAULT_MANUAL_CLEAN_MIN_MISSES: Final = 3
+DEFAULT_MANUAL_CLEAN_NOTIFY: Final = False   # the task is enough; opt-in to also push
+DEFAULT_SHOW_UNREACHABLE: Final = False      # experimental Labs feature, opt-in
+DEFAULT_PRERUN_ENABLED: Final = False       # opt-in: no surprise notification for the community
+DEFAULT_PRERUN_MODE: Final = "morning"      # "morning" | "evening_before" | "lead"
+DEFAULT_PRERUN_TIME: Final = "07:30"
+DEFAULT_PRERUN_LEAD_MIN: Final = 30
 DEFAULT_REPEATS: Final = 1
 
 # How often the engine re-evaluates (seconds). One minute is plenty for a
@@ -143,6 +194,7 @@ def e(domain: str, prefix: str, suffix: str) -> str:
 # Suffixes we read/write on the target vacuum.
 SUF_ERROR: Final = "error"
 SUF_BATTERY: Final = "battery_level"
+SUF_VOLUME: Final = "volume"                        # number: robot speaker volume 0-100
 SUF_STATUS: Final = "status"
 SUF_TASK_STATUS: Final = "task_status"
 SUF_CLEANING_PROGRESS: Final = "cleaning_progress"

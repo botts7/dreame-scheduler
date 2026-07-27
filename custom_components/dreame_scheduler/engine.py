@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
 from datetime import datetime, timedelta
 
@@ -25,7 +26,7 @@ from homeassistant.helpers.event import (
 )
 from homeassistant.util import dt as dt_util
 
-from . import clean_guards, clean_window
+from . import clean_guards, clean_window, history_analytics as hist_a, trap_learner
 from .const import (
     CONF_PREFIX,
     CONF_VACUUM_ENTITY,
@@ -37,9 +38,23 @@ from .const import (
     DEFAULT_GUARD_DUSTBIN,
     DEFAULT_GUARD_WATER,
     DEFAULT_MAP_RESUME,
+    DEFAULT_MANUAL_CLEAN_ENABLED,
+    DEFAULT_MANUAL_CLEAN_MIN_MISSES,
+    DEFAULT_MANUAL_CLEAN_NOTIFY,
+    DEFAULT_MANUAL_CLEAN_STALE_DAYS,
+    DEFAULT_SHOW_UNREACHABLE,
+    DEFAULT_DOOR_RETRY_ENABLED,
+    DEFAULT_DOOR_RETRY_MIN,
+    DEFAULT_DOOR_RETRY_WHILE_HOME,
     DEFAULT_MIN_BATTERY,
+    DEFAULT_PRERUN_ENABLED,
+    DEFAULT_PRERUN_LEAD_MIN,
+    DEFAULT_PRERUN_MODE,
+    DEFAULT_PRERUN_TIME,
     DEFAULT_VACUUM_BEFORE_MOP,
     DEFAULT_AUTO_RECOVER,
+    DEFAULT_QUIET_RECOVERY,
+    DEFAULT_ROOM_MOP_EVERY,
     DEFAULT_NOTIFY_SKIPPED,
     DEFAULT_NOTIFY_STUCK,
     DEFAULT_NOTIFY_WEEKLY,
@@ -68,8 +83,20 @@ from .const import (
     OPT_MIN_BATTERY,
     OPT_NOTIFY_SKIPPED,
     OPT_NOTIFY_STUCK,
+    OPT_MANUAL_CLEAN_ENABLED,
+    OPT_MANUAL_CLEAN_MIN_MISSES,
+    OPT_MANUAL_CLEAN_NOTIFY,
+    OPT_MANUAL_CLEAN_STALE_DAYS,
     OPT_NOTIFY_TARGETS,
     OPT_NOTIFY_WEEKLY,
+    OPT_SHOW_UNREACHABLE,
+    OPT_DOOR_RETRY_ENABLED,
+    OPT_DOOR_RETRY_MIN,
+    OPT_DOOR_RETRY_WHILE_HOME,
+    OPT_PRERUN_ENABLED,
+    OPT_PRERUN_LEAD_MIN,
+    OPT_PRERUN_MODE,
+    OPT_PRERUN_TIME,
     OPT_PRESENCE_ENTITIES,
     OPT_QUIET_SUCTION,
     OPT_REQUIRE_AWAY,
@@ -80,6 +107,7 @@ from .const import (
     OPT_STALE_NUDGE_ENABLED,
     OPT_VACUUM_BEFORE_MOP,
     OPT_AUTO_RECOVER,
+    OPT_QUIET_RECOVERY,
     OPT_WEEK_START_DAY,
     OPT_WINDOW_ENABLED,
     OPT_WINDOW_END,
@@ -89,6 +117,7 @@ from .const import (
     ROOM_DOOR_SENSOR,
     ROOM_ENABLED,
     ROOM_MODE,
+    ROOM_MOP_EVERY,
     ROOM_REPEATS,
     ROOM_SUCTION,
     ROOM_WETNESS,
@@ -104,14 +133,18 @@ from .const import (
     SUF_STATUS,
     SUF_SUCTION,
     SUF_TASK_STATUS,
+    SUF_VOLUME,
     TICK_SECONDS,
     WEEKDAYS,
     e as entity_of,
     room_entity,
 )
 from .scheduler import (
+    advance_mop_cadence,
     all_enabled_segments,
     choose_dispatch,
+    door_open_long_enough,
+    is_mopping_mode,
     needs_week_rollover,
     pending_rooms,
     rooms_due_today,
@@ -160,11 +193,34 @@ INCOMPLETE_RECORD_DWELL_SECONDS = 1800
 RECORD_TS_TOLERANCE = 120
 
 # --- Auto-recovery (unstick + carry on) ---
-# Vacuum error substrings that mean "physically stuck but likely reversible" —
-# worth trying to free rather than just giving up.
+# Vacuum error substrings that mean "physically wedged but likely REVERSIBLE" —
+# a straight reverse-out backs it off the trap and it carries on. Deliberately
+# excludes the beach words below: a high-centred robot can't drive out (proven
+# live 2026-07-15), so those get a hand-needed alert instead of a futile reverse.
 _RECOVERABLE_ERROR_WORDS = (
-    "suffocate", "stuck", "trap", "wheel", "bumper", "cliff", "tangle",
-    "edge", "picked", "lifted", "route", "path",
+    "suffocate", "stuck", "trap", "wheel", "bumper", "tangle",
+    "edge", "route", "path",
+)
+# The robot stopped because something was IN ITS WAY — it is not physically
+# stuck. The right response is the smallest one: just resume, and let it re-plan
+# around whatever it is. A block is a MOMENT, not a property of the room, so we
+# never reverse it, never wall it off, and never send it home — and one
+# obstruction must never end the whole job. Live 2026-07-17: `blocked` twice in
+# 20 min at different spots (faults 63 and 64); a plain vacuum.start carried it
+# on both times, having cleared no obstacle at all.
+_BLOCKED_ERROR_WORDS = ("blocked", "obstacle")
+MAX_BLOCK_RESUMES = 5              # per run, before we stop nudging and ask for help
+# How close a photographed obstacle must be to count as "what stopped it".
+# Generous: on a BLOCK the robot halts clear of the thing (the obstacle is ahead
+# on its path, not under its bumper), so its own position says little about where
+# the cause is — but the nearest photo usually names it.
+OBSTACLE_MATCH_MM = 2500
+# Error substrings that mean the robot is BEACHED / high-centred — it climbed
+# onto something and lifted its drive wheels off the floor. The cliff sensors
+# then read a fall edge ('drop') and lock out all motion; every reverse/rotate
+# returns 0 mm. No command frees it — it needs a manual lift-and-place.
+_BEACH_ERROR_WORDS = (
+    "drop", "cliff", "lifted", "lift", "tilt", "picked", "pick_up", "high",
 )
 REVERSE_OUT_STEPS = 3              # remote-control reverse nudges to back off a trap
 REVERSE_OUT_VELOCITY = -110       # straight reverse (negative), retracing the entry route
@@ -172,6 +228,59 @@ MAX_RECOVER_ATTEMPTS = 3            # per run, before giving up and docking
 RECOVER_FREE_TIMEOUT = 90          # seconds to wait for it to free itself
 NOGO_HALF_MM = 300                 # half-size of the temp no-go box around the stuck point (30 cm)
 MIN_AREA_PER_ROOM_M2 = 2.0         # a run sweeping less than this per dispatched room didn't really clean
+STUCK_MIN_ESCAPE_MM = 80           # a reverse-out that moved less than this achieved nothing
+STUCK_NO_MOVE_LIMIT = 2            # consecutive no-move recoveries before we call it beached
+# A ~350 mm robot needs real margin to plan through a gap. A recovery box that
+# leaves less than this between itself and an existing zone builds a VIRTUAL
+# PINCER the robot simply refuses to enter — live 2026-07-17 a temp box landed
+# 426 mm from the rug no-go and stranded the robot in the channel for 15 min
+# (located, 97% battery, no error, nothing physically touching it).
+ROBOT_CLEARANCE_MM = 500
+# A manual "clean now" is exempt from the return-on-arrival dock — the user asked
+# for it, knowing they were home. That intent only goes STALE once the run has
+# been going for HOURS (it docked to recharge and auto-resumed long after the ask).
+# Live 2026-07-17: an 8-minute-old manual run briefly parked because it got STUCK,
+# which flipped was_parked and had the engine fighting the user's own deliberate
+# test run — dragging it home while they stood watching it.
+MANUAL_INTENT_STALE_SECONDS = 2 * 3600
+# Deep-'Sleeping' robots silently ignore clean_segment until woken (live
+# 2026-07-15) — verify the dispatch actually started; if not, locate to wake and
+# re-send. Bounded waits, so a dispatch never hangs the eval loop for long.
+WAKE_VERIFY_SECONDS = 8            # after clean_segment, confirm it actually started
+WAKE_SETTLE_SECONDS = 12          # after locate, max wait for it to leave 'Sleeping'
+WAKE_POLL_SECONDS = 1.5
+# Silent stuck: the robot claims to be cleaning but hasn't moved for this long,
+# with NO error to trigger auto-recover ('unable to reach', a quiet high-centre).
+SILENT_STUCK_SECONDS = 360
+# STRANDED: no run in flight, yet the robot is sat away from its dock, not
+# moving. _watch_silent_stuck only runs while a run is ACTIVE, so once a run
+# finalises nothing checks the robot ever actually got home. Live 2026-07-15: a
+# run finalised 21:00, the robot then stalled at a no-go on the way to the dock
+# and sat there ALL NIGHT with no alert, because the engine had closed the books.
+STRANDED_SECONDS = 900
+DOCK_RADIUS_MM = 600               # within this of the charger counts as "home"
+# How recent a beaching must be for the "tidy the floor" reminder to keep firing.
+TIDY_RECENCY_DAYS = 2
+# How long the "show me where I'm stuck" robot waits at the spot (light on) so
+# you can see it, before heading home.
+SHOW_DWELL_SECONDS = 60
+# show-unreachable: max wait for the robot to actually BEGIN moving after a goto
+# before we conclude the goto was refused (the target was unreachable and the
+# robot never left). Without this phase a robot still at the dock reads as
+# "already settled" and the trip looked like a no-op (live 2026-07-13).
+MOVE_START_SECONDS = 25
+
+
+# A door-skipped room may be retried at most this many times a day once its
+# door reopens — after that it falls through to the weekly catch-up, so a door
+# that keeps flapping (or a mis-wired sensor) can't send the robot out endlessly.
+MAX_DOOR_RETRIES_PER_DAY = 2
+
+
+class ZoneReadError(RuntimeError):
+    """Raised when the map camera's zones can't be fully parsed. Because
+    vacuum_set_restricted_zone REPLACES the whole zone list, a partial read must
+    never be written back — that would delete the user's own zones."""
 
 
 class SchedulerEngine:
@@ -185,6 +294,10 @@ class SchedulerEngine:
         self._status: dict = {"state": "starting", "reason": "", "enabled": True}
         # coordinator sets this so entities refresh when status changes.
         self._notify_update = None
+        # Stranded-robot watch (no active run — see _watch_stranded).
+        self._stranded_pos: tuple[int, int] | None = None
+        self._stranded_since: datetime | None = None
+        self._stranded_notified = False
         # Serialises evaluations AND manual actions: state-event re-evaluations
         # can land while a tick is still awaiting mid-finalise (double-banking
         # rooms + duplicate history entries, seen live 2026-07-09), and a manual
@@ -201,10 +314,19 @@ class SchedulerEngine:
         )
         watched = [self._vacuum_entity, entity_of("sensor", self._prefix, SUF_ERROR)]
         watched += [ent for ent in self._presence_entities() if ent]
+        # Door sensors: a door reopening is a trigger to retry a room we skipped.
+        watched += [ent for ent in self._door_sensors() if ent]
         current_room = entity_of("sensor", self._prefix, "current_room")
         watched.append(current_room)
         self._unsub.append(
             async_track_state_change_event(self.hass, watched, self._handle_state_event)
+        )
+        # Buttons on the rescue alerts ("Send home" / "Resume clean") come back
+        # as this event when tapped on the phone.
+        self._unsub.append(
+            self.hass.bus.async_listen(
+                "mobile_app_notification_action", self._handle_notification_action
+            )
         )
         await self._tick()  # evaluate immediately on startup
 
@@ -275,6 +397,28 @@ class SchedulerEngine:
         return (any(w in task for w in _CLEANING_ACTIVE_WORDS)
                 or any(w in status for w in _CLEANING_ACTIVE_WORDS))
 
+    def _robot_active_segments(self) -> set:
+        """Segment ids the ROBOT thinks its current task covers (its own
+        active_segments attr), as ints. Empty if unknown."""
+        st = self.hass.states.get(self._vacuum_entity)
+        segs = _plain_attr(st.attributes.get("active_segments")) if st else None
+        out: set = set()
+        if isinstance(segs, (list, tuple)):
+            for s in segs:
+                try:
+                    out.add(int(s))
+                except (TypeError, ValueError):
+                    pass
+        return out
+
+    def _robot_overreaching(self, run: dict) -> bool:
+        """True if the robot is cleaning rooms we did NOT dispatch — a firmware
+        task-state bleed (a stale whole-house task resuming, seen 2026-07-20). It
+        must never clean rooms unbidden, least of all while someone's home."""
+        robot = self._robot_active_segments()
+        want = {int(s) for s in run.get("segments", []) if str(s).isdigit()}
+        return bool(robot) and bool(want) and not robot.issubset(want)
+
     def _error_active(self) -> bool:
         # Only a GENUINE fault should block/interrupt cleaning. The vacuum
         # entity's own 'error' state is that signal. sensor.error also reports
@@ -291,13 +435,34 @@ class SchedulerEngine:
         err = (self._sval(entity_of("sensor", self._prefix, SUF_ERROR)) or "").lower()
         return bool(err) and any(w in err for w in _RECOVERABLE_ERROR_WORDS)
 
+    def _blocked_error(self) -> bool:
+        """True if the vacuum stopped because its path was obstructed — it isn't
+        stuck, something is merely in the way."""
+        if not self._error_active():
+            return False
+        err = (self._sval(entity_of("sensor", self._prefix, SUF_ERROR)) or "").lower()
+        return bool(err) and any(w in err for w in _BLOCKED_ERROR_WORDS)
+
+    def _beached_error(self) -> bool:
+        """True if the vacuum is in error AND the text says it's high-centred /
+        lifted off the floor ('drop', 'lifted', 'cliff', ...) — a beaching no
+        command can free. Distinct from a reversible wedge; needs a manual lift."""
+        if not self._error_active():
+            return False
+        err = (self._sval(entity_of("sensor", self._prefix, SUF_ERROR)) or "").lower()
+        return bool(err) and any(w in err for w in _BEACH_ERROR_WORDS)
+
     # -------- map reads / zone writes (for auto-recovery no-go placement) -----
     def _map_attr(self, key: str):
         st = self.hass.states.get(entity_of("camera", self._prefix, "map"))
         return st.attributes.get(key) if st else None
 
     def _vacuum_position(self) -> tuple[int, int] | None:
-        pos = self._map_attr("vacuum_position")
+        # NOTE: coerce first — the attribute is a Point OBJECT in-process, so a
+        # bare isinstance(dict) check reads every position as None (which blinded
+        # the stuck telemetry, the reverse-out measurement and the silent-stuck
+        # watchdog until 2026-07-17).
+        pos = _plain_attr(self._map_attr("vacuum_position"))
         if isinstance(pos, dict) and pos.get("x") is not None and pos.get("y") is not None:
             return int(pos["x"]), int(pos["y"])
         if isinstance(pos, (list, tuple)) and len(pos) >= 2:
@@ -306,7 +471,9 @@ class SchedulerEngine:
 
     @staticmethod
     def _area_to_rect(a) -> list[int] | None:
-        """Camera no-go/no-mop area (4-corner dict) -> service [x0,y0,x1,y1]."""
+        """Camera no-go/no-mop area (Area object / 4-corner dict) -> service
+        [x0,y0,x1,y1] bounding rect."""
+        a = _plain_attr(a)
         if isinstance(a, dict):
             xs = [a[k] for k in ("x0", "x1", "x2", "x3") if isinstance(a.get(k), (int, float))]
             ys = [a[k] for k in ("y0", "y1", "y2", "y3") if isinstance(a.get(k), (int, float))]
@@ -316,52 +483,169 @@ class SchedulerEngine:
             return [int(a[0]), int(a[1]), int(a[2]), int(a[3])]
         return None
 
+    @staticmethod
+    def _wall_to_line(w) -> list[int] | None:
+        """Camera virtual wall (Line object) -> service [x0,y0,x1,y1].
+
+        Deliberately NOT _area_to_rect: a wall is a SEGMENT, and min/max-ing its
+        endpoints into a bounding box silently moves the wall (a line from
+        (100,200)->(50,300) would come back as (50,200)->(100,300))."""
+        w = _plain_attr(w)
+        if isinstance(w, dict) and all(
+            isinstance(w.get(k), (int, float)) for k in ("x0", "y0", "x1", "y1")
+        ):
+            return [int(w["x0"]), int(w["y0"]), int(w["x1"]), int(w["y1"])]
+        if isinstance(w, (list, tuple)) and len(w) >= 4:
+            return [int(w[0]), int(w[1]), int(w[2]), int(w[3])]
+        return None
+
     def _current_zones(self) -> tuple[list, list, list]:
         """Existing (walls, no-go, no-mop) from the map, in the service's
-        [x0,y0,x1,y1] format, so a write preserves the user's own zones."""
-        walls = [self._area_to_rect(w) for w in (self._map_attr("virtual_walls") or [])]
-        zones = [self._area_to_rect(z) for z in (self._map_attr("no_go_areas") or [])]
-        mops = [self._area_to_rect(m) for m in (self._map_attr("no_mopping_areas") or [])]
-        return ([w for w in walls if w], [z for z in zones if z], [m for m in mops if m])
+        [x0,y0,x1,y1] format, so a write preserves the user's own zones.
+
+        Raises ZoneReadError if the camera reports an entry we can't parse.
+        vacuum_set_restricted_zone REPLACES the whole list, so writing a partial
+        read would silently DELETE the user's zones — refusing to write is always
+        the safer failure."""
+        def conv(raw, fn, label):
+            out = []
+            for item in (raw or []):
+                val = fn(item)
+                if val is None:
+                    raise ZoneReadError(f"unparsable {label} entry: {item!r}")
+                out.append(val)
+            return out
+
+        walls = conv(self._map_attr("virtual_walls"), self._wall_to_line, "virtual wall")
+        zones = conv(self._map_attr("no_go_areas"), self._area_to_rect, "no-go area")
+        mops = conv(self._map_attr("no_mopping_areas"), self._area_to_rect, "no-mop area")
+        return walls, zones, mops
 
     async def _write_zones(self, walls: list, zones: list, no_mops: list) -> None:
         await self._svc("dreame_vacuum", "vacuum_set_restricted_zone",
                         {"entity_id": self._vacuum_entity,
                          "walls": walls, "zones": zones, "no_mops": no_mops})
 
-    async def _add_temp_nogo(self, run: dict, x: int, y: int) -> None:
-        """Drop a small temporary no-go box around (x,y) so the robot stops
-        driving back into whatever just wedged it. Backs the map up once per run
-        before mutating it; the box is removed again in _finalize_run."""
+    @staticmethod
+    def _gap_too_narrow(a: list, b: list, clearance: int) -> int | None:
+        """Gap (mm) between two rects if they'd form a channel narrower than
+        `clearance`, else None. Only counts where they actually face each other
+        (their other axis overlaps) — that's what makes it a channel."""
+        ax0, ax1 = sorted((a[0], a[2]))
+        ay0, ay1 = sorted((a[1], a[3]))
+        bx0, bx1 = sorted((b[0], b[2]))
+        by0, by1 = sorted((b[1], b[3]))
+        if min(ax1, bx1) > max(ax0, bx0):                 # overlap in x -> vertical gap
+            gap = max(ay0, by0) - min(ay1, by1)
+            if 0 <= gap < clearance:
+                return int(gap)
+        if min(ay1, by1) > max(ay0, by0):                 # overlap in y -> horizontal gap
+            gap = max(ax0, bx0) - min(ax1, bx1)
+            if 0 <= gap < clearance:
+                return int(gap)
+        return None
+
+    async def _add_temp_nogo(self, run: dict, x: int, y: int) -> bool:
+        """Temporarily steer the robot around a PROVEN blocker for the rest of
+        this run. Returns True if the box was actually placed.
+
+        Only ever called once a spot has blocked the robot repeatedly within one
+        run (see BLOCK_PATTERN_COUNT) — i.e. it's demonstrably parked there today,
+        not a one-off moment. The box is removed again in _finalize_run, because
+        it's a fact about TODAY, not about the room: only trap_learner may propose
+        a permanent no-go, and only after a spot recurs across DISTINCT runs.
+
+        Refuses to place a box that would pinch a sub-robot-width channel against
+        an existing zone — a no-go is a WALL, and two walls close together trap
+        the robot just as effectively as furniture (live 2026-07-17)."""
         box = [x - NOGO_HALF_MM, y - NOGO_HALF_MM, x + NOGO_HALF_MM, y + NOGO_HALF_MM]
-        walls, zones, no_mops = self._current_zones()
+        try:
+            walls, zones, no_mops = self._current_zones()
+        except ZoneReadError as exc:
+            _LOGGER.warning("work-around: zone read failed, not writing: %s", exc)
+            return False
+        for z in zones:
+            gap = self._gap_too_narrow(box, z, ROBOT_CLEARANCE_MM)
+            if gap is not None:
+                _LOGGER.warning(
+                    "work-around: NOT boxing (%s,%s) — it would leave a %s mm "
+                    "channel against existing zone %s (robot needs %s mm)",
+                    x, y, gap, z, ROBOT_CLEARANCE_MM,
+                )
+                return False
         if not run.get("map_backed_up"):
             try:
                 await self._svc("dreame_vacuum", "vacuum_backup_map",
                                 {"entity_id": self._vacuum_entity})
             except Exception as exc:  # noqa: BLE001
-                _LOGGER.warning("auto-recover: map backup failed: %s", exc)
+                _LOGGER.warning("work-around: map backup failed: %s", exc)
             run["map_backed_up"] = True
         await self._write_zones(walls, zones + [box], no_mops)
         run.setdefault("temp_nogos", []).append(box)
+        _LOGGER.info("work-around: boxed repeated blocker at (%s,%s) for this run", x, y)
+        return True
+
+    @staticmethod
+    def _inside(box: list, x: int, y: int) -> bool:
+        return min(box[0], box[2]) <= x <= max(box[0], box[2]) and \
+               min(box[1], box[3]) <= y <= max(box[1], box[3])
 
     async def _clear_temp_nogos(self, run: dict) -> None:
         boxes = run.get("temp_nogos") or []
         if not boxes:
             return
-        walls, zones, no_mops = self._current_zones()
-        keep = [z for z in zones if z not in boxes]
         try:
+            walls, zones, no_mops = self._current_zones()
+            keep = [z for z in zones if z not in boxes]
             await self._write_zones(walls, keep, no_mops)
         except Exception as exc:  # noqa: BLE001
+            # Includes ZoneReadError — leaving a temp box on the map is a far
+            # smaller harm than writing a partial list and wiping real zones.
             _LOGGER.warning("auto-recover: clearing temp no-go failed: %s", exc)
+            return
+        run["temp_nogos"] = []
+
+    async def _silence_voice(self, run: dict) -> None:
+        """Mute the robot's speaker for the duration of an engine-driven maneuver,
+        remembering the prior volume on the run so it can be restored. Stops it
+        announcing 'unable to reach…' on repeat while WE are re-routing it; normal
+        cleaning keeps its voice. Best-effort — a model without the volume number
+        entity just skips it."""
+        if not bool(self._opt(OPT_QUIET_RECOVERY, DEFAULT_QUIET_RECOVERY)):
+            return
+        if run.get("saved_volume") is not None:
+            return  # already muted this maneuver
+        ent = entity_of("number", self._prefix, SUF_VOLUME)
+        raw = self._sval(ent)
+        try:
+            cur = int(float(raw)) if raw is not None else None
+        except (TypeError, ValueError):
+            cur = None
+        if cur is None or cur == 0:
+            return  # can't read it, or already silent — nothing to save/restore
+        run["saved_volume"] = cur
+        await self._svc("number", "set_value", {"entity_id": ent, "value": 0})
+
+    async def _restore_voice(self, run: dict) -> None:
+        """Restore the volume muted by _silence_voice (no-op if we never muted)."""
+        saved = run.get("saved_volume")
+        if saved is None:
+            return
+        run["saved_volume"] = None
+        ent = entity_of("number", self._prefix, SUF_VOLUME)
+        await self._svc("number", "set_value", {"entity_id": ent, "value": saved})
 
     async def _reverse_out(self, steps: int = REVERSE_OUT_STEPS,
-                           velocity: int = REVERSE_OUT_VELOCITY) -> None:
+                           velocity: int = REVERSE_OUT_VELOCITY) -> int:
         """Back the robot straight out the way it came — the primitive that
         reliably frees a wedge when return_to_base alone keeps ramming the
         blocked path forward. Verified live 2026-07-13: a `route` error at a rug
-        lip cleared after a few reverse nudges. No vacuuming, minimal battery."""
+        lip cleared after a few reverse nudges. No vacuuming, minimal battery.
+
+        Returns how far (mm) the robot actually moved. ~0 mm means the reverse
+        achieved nothing — the tell-tale of a beaching (wheels off the floor),
+        where every command returns 0 mm (proven live 2026-07-15)."""
+        before = self._vacuum_position()
         for _ in range(max(1, steps)):
             try:
                 await self._svc("dreame_vacuum", "vacuum_remote_control_move_step",
@@ -369,16 +653,117 @@ class SchedulerEngine:
                                  "rotation": 0, "velocity": velocity})
             except Exception as exc:  # noqa: BLE001
                 _LOGGER.warning("auto-recover: reverse step failed: %s", exc)
-                return
+                break
             await asyncio.sleep(1.0)
+        after = self._vacuum_position()
+        if before and after:
+            return int(math.hypot(after[0] - before[0], after[1] - before[1]))
+        return 0
+
+    async def _handle_beached(self, run: dict, now: datetime) -> bool:
+        """The robot is high-centred / lifted off the floor. No command can free
+        it (reverse-out returns 0 mm — proven live 2026-07-15), so don't burn
+        recovery attempts: alert once for a manual lift and hold. Runs regardless
+        of the auto-recover option — there's nothing to auto-recover."""
+        where = self._sval(entity_of("sensor", self._prefix, "current_room")) or "somewhere"
+        if run.get("notified_beached"):
+            self._set_status("error", f"beached near {where} — waiting to be lifted")
+            return True
+        run["notified_beached"] = True
+        run["errored"] = True
+        pos = self._vacuum_position()
+        await self.tracker.async_set_active_run(run)
+        await self.tracker.async_log_stuck({
+            "ts": now.isoformat(),
+            "room": where,
+            "x": pos[0] if pos else None,
+            "y": pos[1] if pos else None,
+            "error": (self._sval(entity_of("sensor", self._prefix, SUF_ERROR)) or "drop"),
+            "kind": run.get("kind"),
+            "attempt": 0,
+            "run_id": run.get("started"),
+            "beached": True,
+        })
+        if bool(self._opt(OPT_NOTIFY_STUCK, DEFAULT_NOTIFY_STUCK)):
+            await self._notify(
+                "🆘 Vacuum needs a hand",
+                f"It's beached near {where} — climbed onto something and lifted its "
+                "wheels off the floor, so it can't free itself. Please lift it onto "
+                "flat floor; it'll carry on once it's back down.",
+                high_priority=True,
+                actions=self._rescue_actions(),
+            )
+        self._set_status("error", f"beached near {where} — needs a manual lift")
+        _LOGGER.info("beached (unrecoverable) near %s at %s", where, pos)
+        return True
+
+    async def _handle_blocked(self, run: dict, now: datetime) -> bool:
+        """Something is in its way. Do the SMALLEST thing that works: resume.
+
+        The robot re-plans around the obstruction and gets on with the job. We do
+        not reverse it, wall the spot off, or send it home — a block is a moment
+        (a toy, a chair, someone's feet), not a property of the room, and one
+        obstruction must never end the whole clean. Only if it keeps happening do
+        we stop nudging and ask for help."""
+        where = self._sval(entity_of("sensor", self._prefix, "current_room")) or "somewhere"
+        n = int(run.get("block_resumes", 0))
+        if n >= MAX_BLOCK_RESUMES:
+            if not run.get("notified_blocked"):
+                run["notified_blocked"] = True
+                run["errored"] = True
+                await self.tracker.async_set_active_run(run)
+                if bool(self._opt(OPT_NOTIFY_STUCK, DEFAULT_NOTIFY_STUCK)):
+                    # Show the user WHAT stopped it. The robot photographed the
+                    # thing; a picture ends the guesswork instantly. NOTE the
+                    # obstacle sits ahead on its path, NOT under it — so we name
+                    # the obstacle's own room/position, never the robot's.
+                    snap = self._obstacle_snapshot(self._vacuum_position())
+                    if snap:
+                        what, url, dist = snap
+                        msg = (f"Something's in its way and it can't find a route. "
+                               f"Nearest thing it photographed: {what}, about "
+                               f"{dist / 1000:.1f} m away. Move it and it'll carry on.")
+                    else:
+                        url = None
+                        msg = (f"Something's been in its way near {where} {n} times, "
+                               "so it can't get on with the clean. Worth a look.")
+                    await self._notify(
+                        "⚠️ Vacuum blocked — here's what it saw",
+                        msg,
+                        high_priority=True,
+                        actions=self._rescue_actions(),
+                        image=url,
+                    )
+            self._set_status("error", f"blocked repeatedly near {where}")
+            return True
+
+        run["block_resumes"] = n + 1
+        run["errored"] = True
+        await self.tracker.async_set_active_run(run)
+        pos = self._vacuum_position()
+        await self.tracker.async_log_stuck({
+            "ts": now.isoformat(), "room": where,
+            "x": pos[0] if pos else None, "y": pos[1] if pos else None,
+            "error": (self._sval(entity_of("sensor", self._prefix, SUF_ERROR)) or "blocked"),
+            "kind": run.get("kind"), "attempt": n + 1,
+            "run_id": run.get("started"), "beached": False,
+        })
+        await self._resume_run(run)
+        self._set_status("running", f"something was in its way near {where} — carrying on")
+        _LOGGER.info("blocked near %s at %s — resumed (%s/%s)", where, pos, n + 1, MAX_BLOCK_RESUMES)
+        return True
 
     async def _maybe_auto_recover(self, run: dict, now: datetime) -> bool:
-        """Unstick a wedged robot and CARRY ON cleaning (avoiding the spot),
-        rather than docking. Returns True if it handled this tick.
+        """Unstick a wedged robot and CARRY ON cleaning, rather than docking.
+        Returns True if it handled this tick."""
+        # Beaching first, before the auto-recover gate: a lifted/high-centred
+        # robot needs a hand no matter the option — reverse-out can't help it.
+        if self._beached_error():
+            return await self._handle_beached(run, now)
+        # Merely obstructed? Just resume — the least intervention that works.
+        if self._blocked_error():
+            return await self._handle_blocked(run, now)
 
-        NOTE: the free-then-continue command sequence (return_to_base to free,
-        then vacuum.start to continue) is the one part that wants live tuning per
-        model — kept isolated here so it's easy to adjust."""
         if not bool(self._opt(OPT_AUTO_RECOVER, DEFAULT_AUTO_RECOVER)):
             return False
 
@@ -390,6 +775,7 @@ class SchedulerEngine:
                 # dock instead of resuming into an occupied house.
                 home_block = (run.get("interrupting") or run.get("suspended")
                               or (run.get("kind") != "manual"
+                                  and not run.get("door_retry_home")
                                   and bool(self._opt(OPT_RETURN_ON_ARRIVAL, DEFAULT_RETURN_ON_ARRIVAL))
                                   and bool(self._opt(OPT_REQUIRE_AWAY, DEFAULT_REQUIRE_AWAY))
                                   and self._presence_home() is True))
@@ -397,10 +783,11 @@ class SchedulerEngine:
                     await self._svc("vacuum", "return_to_base", {"entity_id": self._vacuum_entity})
                     self._set_status("returning", "recovered — someone home, docking")
                 else:
-                    # Resume the clean; the fresh no-go keeps it clear of the
-                    # trap. Don't let it just dock.
-                    await self._svc("vacuum", "start", {"entity_id": self._vacuum_entity})
+                    # Resume the clean — but only the run's OWN segments, never a
+                    # bare vacuum.start (which whole-houses once the task ended).
+                    await self._resume_run(run)
                     self._set_status("running", "recovered — carrying on, steering clear of the stuck spot")
+                await self._restore_voice(run)
                 run["recovering"] = False
                 await self.tracker.async_set_active_run(run)
                 return True
@@ -411,6 +798,7 @@ class SchedulerEngine:
                 return True
             # Couldn't free itself in time — stop trying; fall through to the
             # normal stuck-notify + completion handling (which will dock/alert).
+            await self._restore_voice(run)
             run["recovering"] = False
             await self.tracker.async_set_active_run(run)
             return False
@@ -427,12 +815,7 @@ class SchedulerEngine:
             return False
 
         where = self._sval(entity_of("sensor", self._prefix, "current_room")) or "somewhere"
-        pos = self._vacuum_position()
-        if pos is not None:
-            try:
-                await self._add_temp_nogo(run, pos[0], pos[1])
-            except Exception as exc:  # noqa: BLE001
-                _LOGGER.warning("auto-recover: no-go write failed: %s", exc)
+        pos = self._vacuum_position()   # the TRAP — walled off after it backs away
         run["recover_count"] = int(run.get("recover_count", 0)) + 1
         run["recovering"] = True
         run["recover_started"] = now.isoformat()
@@ -449,22 +832,203 @@ class SchedulerEngine:
             "error": (self._sval(entity_of("sensor", self._prefix, SUF_ERROR)) or "unknown"),
             "kind": run.get("kind"),
             "attempt": run["recover_count"],
+            "run_id": run.get("started"),
+            "beached": False,
         })
         # Reverse out first — back off the trap the way it came in. return_to_base
         # alone kept ramming the blocked path forward (live 2026-07-13: a route
         # error at a rug lip); a straight reverse retraces the entry route and
         # frees it. Then hand off to return_to_base, which continues the robot's
         # own reverse-out recovery and re-localises (verified 2026-07-07 + 07-13).
-        await self._reverse_out()
+        await self._silence_voice(run)   # hush it while WE drive the reverse-out
+        moved = await self._reverse_out()
+        # We deliberately DON'T wall the spot off any more.
+        #
+        # A block is a MOMENT, not a property of the room. What stopped it is
+        # usually a toy, a chair pushed out, a pair of feet — writing that into
+        # the map turns a temporary fact into a permanent wall, and walls don't
+        # expire. Live 2026-07-17 the temp box pinched the robot against an
+        # existing zone and stranded it 15 min; separately a no-go placed on one
+        # night's evidence blocked a whole run for 18 min. Both times the fix was
+        # to REMOVE a wall and press resume — never to add one. The path planner
+        # routes around obstacles better than we can guess at them.
+        #
+        # Only trap_learner ever proposes a PERMANENT no-go: after a spot has
+        # stuck across several DISTINCT runs (so it really is a property of the
+        # room, not today's clutter), and then only as a suggestion to approve.
         await self._svc("vacuum", "return_to_base", {"entity_id": self._vacuum_entity})
+        # A reverse-out that moved ~nothing achieved nothing. One dud can be
+        # timing; repeated duds mean it's beached (wheels off the floor) even
+        # though the error text didn't say so — escalate to a hand-needed alert
+        # rather than looping uselessly (learned live 2026-07-15).
+        run["stuck_no_move"] = (int(run.get("stuck_no_move", 0)) + 1
+                                if moved < STUCK_MIN_ESCAPE_MM else 0)
+        await self.tracker.async_set_active_run(run)
+        if run["stuck_no_move"] >= STUCK_NO_MOVE_LIMIT:
+            run["recovering"] = False
+            await self._restore_voice(run)   # our maneuver's over; give it its voice back
+            await self._handle_beached(run, now)
+            return True
         if bool(self._opt(OPT_NOTIFY_STUCK, DEFAULT_NOTIFY_STUCK)):
             await self._notify(
                 "🛟 Vacuum recovering",
                 f"Got stuck near {where} — walled off the spot and freeing it to carry on.",
                 high_priority=True,
+                actions=self._rescue_actions(),
             )
-        _LOGGER.info("auto-recover: attempt %s near %s at %s", run["recover_count"], where, pos)
+        _LOGGER.info("auto-recover: attempt %s near %s at %s (moved %s mm)",
+                     run["recover_count"], where, pos, moved)
         return True
+
+    def _charger_position(self) -> tuple[int, int] | None:
+        pos = _plain_attr(self._map_attr("charger_position"))
+        if isinstance(pos, dict) and pos.get("x") is not None and pos.get("y") is not None:
+            return int(pos["x"]), int(pos["y"])
+        if isinstance(pos, (list, tuple)) and len(pos) >= 2:
+            return int(pos[0]), int(pos[1])
+        return None
+
+    def _at_dock(self, pos: tuple[int, int] | None = None) -> bool:
+        """Is the robot physically AT its dock? MEASURED, never inferred from the
+        state name.
+
+        `idle` means "doing nothing" — NOT "at the dock". A robot idle in the
+        middle of the floor is stranded, and treating idle as parked is what made
+        the silent-stuck watchdog skip a genuinely stranded robot while the status
+        line cheerfully claimed it was "paused at the dock" 8 m away (live
+        2026-07-17)."""
+        if pos is None:
+            pos = self._vacuum_position()
+        dock = self._charger_position()
+        if pos is not None and dock is not None:
+            return math.hypot(pos[0] - dock[0], pos[1] - dock[1]) <= DOCK_RADIUS_MM
+        # No coordinates to measure with — fall back to the robot's own claim.
+        return (self._vacuum_state() or "") == "docked"
+
+    def _manual_intent_stale(self, run: dict, now: datetime) -> bool:
+        """Has a manual "clean now" outlived the intent behind it?
+
+        Only true once it actually docked to recharge AND the run has been going
+        for hours. Merely having parked is NOT enough — a run that stopped briefly
+        because it got stuck is still the run the user asked for 8 minutes ago,
+        and treating that as stale made the engine drag the robot home mid-test
+        while the user stood watching it (live 2026-07-17)."""
+        if not run.get("was_parked"):
+            return False
+        started = _parse_iso(run.get("started"))
+        if started is None:
+            return False
+        return (now - started).total_seconds() >= MANUAL_INTENT_STALE_SECONDS
+
+    def _where_parked(self) -> str:
+        """Honest wording for the status line. Saying 'paused at the dock' while
+        the robot sits stranded mid-floor actively misleads (live 2026-07-17)."""
+        return "at the dock" if self._at_dock() else "away from the dock — it may be stuck"
+
+    async def _watch_stranded(self, now: datetime) -> None:
+        """Alert when the robot is left sitting away from its dock with NO run in
+        flight — the duty-of-care gap. _watch_silent_stuck only runs while a run
+        is active, so the moment a run finalises (or is interrupted and sent
+        home) nothing checks whether the robot ever actually made it back. Live
+        2026-07-15: the run finalised at 21:00, the robot then stalled at a no-go
+        en route to the dock and sat out all night, silently."""
+        state = self._vacuum_state() or ""
+        if self._robot_busy():
+            self._stranded_pos = None
+            self._stranded_since = None
+            self._stranded_notified = False
+            return
+        pos = self._vacuum_position()
+        if pos is None:
+            return
+        if self._at_dock(pos):                       # measured, not state-name guessed
+            self._stranded_pos = None
+            self._stranded_since = None
+            self._stranded_notified = False
+            return
+        last = self._stranded_pos
+        if last is None or math.hypot(pos[0] - last[0], pos[1] - last[1]) >= STUCK_MIN_ESCAPE_MM:
+            self._stranded_pos = pos                 # still moving -> re-arm
+            self._stranded_since = now
+            self._stranded_notified = False
+            return
+        if self._stranded_notified or self._stranded_since is None:
+            return
+        stalled = (now - self._stranded_since).total_seconds()
+        if stalled < STRANDED_SECONDS:
+            return
+        self._stranded_notified = True
+        where = self._sval(entity_of("sensor", self._prefix, "current_room")) or "somewhere"
+        err = self._sval(entity_of("sensor", self._prefix, SUF_ERROR)) or "no error"
+        await self.tracker.async_log_stuck({
+            "ts": now.isoformat(), "room": where, "x": pos[0], "y": pos[1],
+            "error": f"stranded ({err})", "kind": "idle", "attempt": 0,
+            "run_id": None, "beached": False,
+        })
+        await self._notify(
+            "⚠️ Vacuum stranded away from its dock",
+            f"It's been sat near {where} for {int(stalled // 60)} min with no clean "
+            f"running, and hasn't made it back to the dock (state: {state}, error: "
+            f"{err}). It probably needs a hand.",
+            high_priority=True,
+            actions=self._rescue_actions(),
+        )
+        _LOGGER.info("stranded near %s at %s for %ss (state=%s, error=%s)",
+                     where, pos, int(stalled), state, err)
+
+    async def _watch_silent_stuck(self, run: dict, now: datetime) -> None:
+        """Detect a robot that's stopped somewhere away from its dock during a run
+        and hasn't errored — the silent stuck ('unable to reach', a quiet
+        high-centre, a give-up mid-return) that the error-driven recovery can't
+        see. Deliberately does NOT care what the vacuum state says: cleaning,
+        returning, paused and idle all count, because the only question that
+        matters is "is it away from the dock and not moving?". Detect + log +
+        notify once; re-arms the moment the robot moves again."""
+        pos = self._vacuum_position()
+        if pos is None:
+            return
+        last = run.get("last_pos")
+        moved_far = (not isinstance(last, (list, tuple)) or len(last) < 2
+                     or math.hypot(pos[0] - last[0], pos[1] - last[1]) >= STUCK_MIN_ESCAPE_MM)
+        if moved_far:
+            run["last_pos"] = [pos[0], pos[1]]
+            run["last_moved_at"] = now.isoformat()
+            run.pop("silent_stuck_notified", None)   # moved again -> re-arm
+            await self.tracker.async_set_active_run(run)
+            return
+        # Stationary. Decide "is it safely home?" by MEASURING the distance to the
+        # dock — never by the state name. `idle` means "doing nothing", NOT "at the
+        # dock": a robot idle in the middle of the floor is the stranded case, and
+        # gating on _PARKED_STATES here silently skipped exactly that (live
+        # 2026-07-17: stranded at the couch in `idle`, no alert, run held open
+        # claiming "paused at the dock" 8 m away from it).
+        if self._at_dock(pos):
+            return
+        if self._error_active() or run.get("silent_stuck_notified"):
+            return  # errors go through auto-recover / beach handling instead
+        moved_at = _parse_iso(run.get("last_moved_at"))
+        stalled = (now - moved_at).total_seconds() if moved_at else 0
+        if stalled < SILENT_STUCK_SECONDS:
+            return
+        run["silent_stuck_notified"] = True
+        await self.tracker.async_set_active_run(run)
+        where = self._sval(entity_of("sensor", self._prefix, "current_room")) or "somewhere"
+        await self.tracker.async_log_stuck({
+            "ts": now.isoformat(), "room": where,
+            "x": pos[0], "y": pos[1], "error": "no_progress",
+            "kind": run.get("kind"), "attempt": 0,
+            "run_id": run.get("started"), "beached": False,
+        })
+        if bool(self._opt(OPT_NOTIFY_STUCK, DEFAULT_NOTIFY_STUCK)):
+            mins = int(stalled // 60)
+            await self._notify(
+                "⚠️ Vacuum may be stuck",
+                f"It's sat near {where} for {mins} min without moving, but reported no "
+                "error. It may be wedged somewhere it can't drive out of — worth a look.",
+                high_priority=True,
+                actions=self._rescue_actions(),
+            )
+        _LOGGER.info("silent-stuck: no movement near %s for %ss", where, int(stalled))
 
     def _battery(self) -> float | None:
         st = self.hass.states.get(self._vacuum_entity)
@@ -502,6 +1066,16 @@ class SchedulerEngine:
         if not ent:
             return None
         return self._sval(ent)
+
+    def _door_sensors(self) -> list[str]:
+        """Every distinct door/contact entity mapped to a room (for the watch
+        list). Order-stable, de-duplicated."""
+        seen: list[str] = []
+        for cfg in self._rooms().values():
+            ent = cfg.get(ROOM_DOOR_SENSOR) if isinstance(cfg, dict) else None
+            if ent and ent not in seen:
+                seen.append(ent)
+        return seen
 
     def _room_name(self, seg) -> str:
         nm = self._sval(room_entity("select", self._prefix, seg, "name"))
@@ -647,10 +1221,29 @@ class SchedulerEngine:
             await self._check_active_run(now, away_ok)
             return
 
+        # No run in flight — but the robot may still be stranded out there from a
+        # finished/interrupted one. Nothing else watches for that.
+        try:
+            await self._watch_stranded(now)
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning("stranded watch failed: %s", exc)
+
+        # Pre-run tidy heads-up (once/day, at the user's chosen trigger) — best-
+        # effort, never let it block the schedule.
+        try:
+            await self._maybe_prerun_announce(now, weekday, now_min)
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning("pre-run announce failed: %s", exc)
+
         # 3b) An interrupted run waiting for the house to empty again?
         if self.tracker.resume and bool(self._opt(OPT_RESUME_WHEN_AWAY, DEFAULT_RESUME_WHEN_AWAY)):
             if await self._try_resume(now, now_min, away_ok):
                 return
+
+        # 3c) A room skipped for a shut door whose door has now been open long
+        #     enough to retry (opt-in; may run while home if the user allowed it).
+        if await self._maybe_door_retry(now, now_min, away_ok):
+            return
 
         # 4) Is a daily or catch-up dispatch due right now?
         decision = choose_dispatch(
@@ -675,6 +1268,10 @@ class SchedulerEngine:
             elif decision.kind == "catchup" and decision.reason == "week_already_complete":
                 await self.tracker.async_set_catchup_dispatched(today.isoformat())
             await self._maybe_stale_nudge(now, away_ok)
+            try:
+                await self._sync_manual_clean(now)   # catch time-based staleness
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.warning("manual-clean sync failed: %s", exc)
             self._set_status("idle", self._idle_reason(now, away_ok))
             return
 
@@ -732,12 +1329,19 @@ class SchedulerEngine:
                 blocked.append(seg)
         if blocked:
             await self.tracker.async_mark_unreachable(blocked)
+            retry_on = bool(self._opt(OPT_DOOR_RETRY_ENABLED, DEFAULT_DOOR_RETRY_ENABLED))
+            if retry_on:
+                # Remember them so the door-retry watcher can send the robot back
+                # once the door has been open long enough (see _maybe_door_retry).
+                await self.tracker.async_mark_door_deferred(blocked, today_iso)
             if bool(self._opt(OPT_NOTIFY_SKIPPED, DEFAULT_NOTIFY_SKIPPED)):
                 names = ", ".join(self._room_name(s) for s in blocked)
-                await self._notify(
-                    "Vacuum: rooms skipped",
-                    f"Door closed — skipped {names}. Will retry on the catch-up day.",
-                )
+                if retry_on:
+                    mins = self._opt_int(OPT_DOOR_RETRY_MIN, DEFAULT_DOOR_RETRY_MIN)
+                    tail = f"Will retry once the door's been open for {mins} min."
+                else:
+                    tail = "Will retry on the catch-up day."
+                await self._notify("Vacuum: rooms skipped", f"Door closed — skipped {names}. {tail}")
 
         if not reachable:
             await self._mark_dispatched(decision.kind, today_iso)
@@ -784,12 +1388,125 @@ class SchedulerEngine:
         else:
             await self.tracker.async_set_day_dispatched(today_iso)
 
+    async def _maybe_door_retry(self, now: datetime, now_min: int, away_ok: bool) -> bool:
+        """Retry a room skipped earlier today for a shut door, once that door has
+        been open for the configured time. Opt-in. Honours the away gate unless
+        the user allowed retrying while home — in which case the open-for-N-min
+        timer is the sole proof the room is clear (the shower-door case). Returns
+        True if it dispatched a retry."""
+        if not bool(self._opt(OPT_DOOR_RETRY_ENABLED, DEFAULT_DOOR_RETRY_ENABLED)):
+            return False
+        deferred = self.tracker.door_deferred
+        if not deferred:
+            return False
+        today_iso = now.date().isoformat()
+        mins = self._opt_int(OPT_DOOR_RETRY_MIN, DEFAULT_DOOR_RETRY_MIN)
+        while_home = bool(self._opt(OPT_DOOR_RETRY_WHILE_HOME, DEFAULT_DOOR_RETRY_WHILE_HOME))
+        rooms = self._rooms()
+        cleaned = self.tracker.cleaned
+
+        ready: list[str] = []
+        for seg, info in list(deferred.items()):
+            # Drop stale (previous-day) or already-cleaned entries.
+            if not isinstance(info, dict) or info.get("date") != today_iso:
+                await self.tracker.async_clear_door_deferred(seg)
+                continue
+            if str(seg) in cleaned:
+                await self.tracker.async_clear_door_deferred(seg)
+                continue
+            if int(info.get("retries", 0)) >= MAX_DOOR_RETRIES_PER_DAY:
+                continue
+            # Presence: away is always fine; while-home leans on the open-timer.
+            if not away_ok and not while_home:
+                continue
+            ent = (rooms.get(seg, {}) or {}).get(ROOM_DOOR_SENSOR)
+            st = self.hass.states.get(ent) if ent else None
+            if st is None:
+                continue
+            if not door_open_long_enough(st.state, st.last_changed, now, mins):
+                continue
+            ready.append(seg)
+
+        if not ready:
+            return False
+
+        # Window / battery / station preconditions, same as any fresh start.
+        gates_ok, reason = self._start_gates_ok(now_min)
+        if not gates_ok:
+            self._set_status("waiting", reason)
+            return False
+
+        for seg in ready:
+            await self.tracker.async_bump_door_retry(seg, today_iso)
+        _LOGGER.info("door-retry: door open >= %s min -> re-cleaning %s", mins, ready)
+        await self._dispatch_clean(ready, "daily", now)
+        # Started under the while-home allowance? Flag the run so the
+        # return-on-arrival guard doesn't immediately dock it for being home.
+        if not away_ok:
+            run = self.tracker.active_run
+            if run is not None:
+                run["door_retry_home"] = True
+                await self.tracker.async_set_active_run(run)
+        return True
+
     def _pick_seq_mode(self) -> str | None:
         """Best available global sweep-then-mop mode for this vacuum, or None if
         it exposes neither (run then just uses whatever global mode is set)."""
         st = self.hass.states.get(entity_of("select", self._prefix, SUF_CLEANING_MODE))
         options = list(st.attributes.get("options", [])) if st else []
         return next((m for m in SEQ_MOP_MODES if m in options), None)
+
+    async def _send_clean_segment(self, int_segments: list[int]) -> None:
+        """Start a segment clean, coping with the deep-'Sleeping' no-op: a robot
+        in standby silently ignores clean_segment (seen live 2026-07-15), leaving
+        the engine tracking a run that never began. Verify it actually started;
+        if not, wake it with vacuum.locate and re-send once."""
+        await self._svc(DREAME_DOMAIN, SERVICE_CLEAN_SEGMENT,
+                        {"entity_id": self._vacuum_entity, "segments": int_segments})
+        if await self._await_started(WAKE_VERIFY_SECONDS):
+            return
+        _LOGGER.info("clean_segment ignored (robot asleep?) — waking and retrying")
+        await self._svc("vacuum", "locate", {"entity_id": self._vacuum_entity})
+        await self._await_awake(WAKE_SETTLE_SECONDS)
+        await self._svc(DREAME_DOMAIN, SERVICE_CLEAN_SEGMENT,
+                        {"entity_id": self._vacuum_entity, "segments": int_segments})
+        await self._await_started(WAKE_VERIFY_SECONDS)
+
+    async def _resume_run(self, run: dict | None) -> None:
+        """Resume a run by re-dispatching ITS OWN segments — never a bare
+        vacuum.start. On the Dreame, vacuum.start expands to a WHOLE-HOUSE clean
+        the moment the segment task has ended (not merely paused). Live
+        2026-07-20: a door-blocked Toilet [6] run's recovery vacuum.start launched
+        all 15 rooms while the user was home. Re-issuing clean_segment keeps it to
+        the rooms we actually dispatched, whether the task is paused or ended."""
+        segs = [int(s) for s in (run or {}).get("segments", []) if str(s).isdigit()]
+        if segs:
+            await self._send_clean_segment(segs)
+        else:
+            # No segments to constrain to — do NOTHING rather than let a bare
+            # vacuum.start clean the whole house unbidden.
+            _LOGGER.warning("resume requested with no run segments — skipping (won't whole-house)")
+
+    async def _await_started(self, timeout: float) -> bool:
+        """Poll briefly for the robot to actually begin working (or error out)."""
+        waited = 0.0
+        while waited < timeout:
+            if self._robot_busy() or self._error_active():
+                return True
+            await asyncio.sleep(WAKE_POLL_SECONDS)
+            waited += WAKE_POLL_SECONDS
+        return self._robot_busy() or self._error_active()
+
+    async def _await_awake(self, timeout: float) -> None:
+        """Wait (bounded) for the robot to leave deep 'Sleeping' after a locate,
+        so the re-sent clean_segment lands on an awake robot."""
+        waited = 0.0
+        while waited < timeout:
+            status = (self._sval(entity_of("sensor", self._prefix, SUF_STATUS)) or "").lower()
+            if "sleep" not in status and self._vacuum_state() is not None:
+                return
+            await asyncio.sleep(WAKE_POLL_SECONDS)
+            waited += WAKE_POLL_SECONDS
 
     async def _dispatch_clean(self, segments: list[str], kind: str, now: datetime,
                               quiet: bool = False) -> None:
@@ -836,9 +1553,24 @@ class SchedulerEngine:
                             {"entity_id": entity_of("switch", self._prefix, SUF_CUSTOMIZED)})
             rooms = self._rooms()
             default_mode = self._opt(OPT_DEFAULT_MODE, "")
+            today_iso = now.date().isoformat()
             for seg in segments:
                 cfg = rooms.get(seg, {})
-                mode = cfg.get(ROOM_MODE) or default_mode
+                base_mode = cfg.get(ROOM_MODE) or default_mode
+                # Per-room "mop every N sweep-days" cadence: on off-cadence days a
+                # mopping room sweeps only; N<=1 (default) leaves the mode as-is.
+                # The counter advances once per calendar day (see
+                # advance_mop_cadence), so a resume/manual re-dispatch today keeps
+                # the same decision.
+                try:
+                    mop_every = int(cfg.get(ROOM_MOP_EVERY, DEFAULT_ROOM_MOP_EVERY))
+                except (TypeError, ValueError):
+                    mop_every = DEFAULT_ROOM_MOP_EVERY
+                prev = self.tracker.mop_counters.get(str(seg)) or {}
+                count, mode, will_mop = advance_mop_cadence(
+                    base_mode, mop_every, prev.get("count"), prev.get("date"), today_iso)
+                if is_mopping_mode(base_mode) and mop_every > 1:
+                    await self.tracker.async_set_mop_counter(seg, count, today_iso)
                 suction = (quiet_suction if quiet and quiet_suction
                            else (cfg.get(ROOM_SUCTION) or default_suction))
                 wetness = cfg.get(ROOM_WETNESS)
@@ -846,17 +1578,14 @@ class SchedulerEngine:
                     await self._select(room_entity("select", self._prefix, seg, "cleaning_mode"), mode)
                 if suction:
                     await self._select(room_entity("select", self._prefix, seg, "suction_level"), suction)
-                if wetness not in (None, ""):
+                if will_mop and wetness not in (None, ""):
                     await self._svc("number", "set_value", {
                         "entity_id": room_entity("number", self._prefix, seg, "wetness_level"),
                         "value": wetness,
                     })
 
         int_segments = [int(s) for s in segments if str(s).isdigit()]
-        await self._svc(DREAME_DOMAIN, SERVICE_CLEAN_SEGMENT, {
-            "entity_id": self._vacuum_entity,
-            "segments": int_segments,
-        })
+        await self._send_clean_segment(int_segments)
         self._set_status("running", f"{kind}: cleaning {', '.join(seg_names.values())}")
         _LOGGER.info("dreame_scheduler: dispatched %s clean of segments %s", kind, int_segments)
 
@@ -886,7 +1615,19 @@ class SchedulerEngine:
                 await self._finalize_run(run, now, record=None, interrupted=True)
                 return
             if away_ok:
-                await self._svc("vacuum", "start", {"entity_id": self._vacuum_entity})
+                # Map-resume wants the firmware to continue the PAUSED breakpoint
+                # (the un-cleaned area). Only a bare vacuum.start does that — but
+                # if the paused task is gone, vacuum.start whole-houses, so guard
+                # on the robot actually reporting a paused/segment task and
+                # otherwise re-dispatch just our segments.
+                va = self.hass.states.get(self._vacuum_entity)
+                paused_task = bool(va and (va.attributes.get("cleaning_paused")
+                                           or va.attributes.get("paused")
+                                           or va.attributes.get("segment_cleaning")))
+                if paused_task:
+                    await self._svc("vacuum", "start", {"entity_id": self._vacuum_entity})
+                else:
+                    await self._resume_run(run)
                 run["suspended"] = False
                 await self.tracker.async_set_active_run(run)
                 self._set_status("running", "resuming the un-cleaned area")
@@ -916,6 +1657,7 @@ class SchedulerEngine:
                             "⚠️ Vacuum needs help",
                             f"The robot errored near {where} while paused for someone being home.",
                             high_priority=True,
+                            actions=self._rescue_actions(),
                         )
             return
 
@@ -938,6 +1680,32 @@ class SchedulerEngine:
             run["seen_active"] = True
             await self.tracker.async_set_active_run(run)
 
+        # Silent stuck: stopped away from the dock, not moving, not erroring.
+        # Detect/alert (once) before the error + completion logic.
+        if run.get("seen_active"):
+            await self._watch_silent_stuck(run, now)
+
+        # Overreach guard: the robot is cleaning rooms we never dispatched (a
+        # stale whole-house task bleeding back in — live 2026-07-20). Rein it in:
+        # send it home and finalise as interrupted, so it can't clean the house
+        # unbidden. Mark interrupting once so we don't fight it every tick.
+        if self._robot_overreaching(run) and not run.get("interrupting"):
+            _LOGGER.warning("robot overreaching: cleaning %s, dispatched %s — reining in",
+                            self._robot_active_segments(), run.get("segments"))
+            run["interrupting"] = True
+            run["errored"] = True
+            await self.tracker.async_set_active_run(run)
+            await self._svc("vacuum", "return_to_base", {"entity_id": self._vacuum_entity})
+            self._set_status("returning", "reining it in — it started cleaning rooms it wasn't asked to")
+            if bool(self._opt(OPT_NOTIFY_STUCK, DEFAULT_NOTIFY_STUCK)):
+                await self._notify(
+                    "⚠️ Vacuum overreached",
+                    "It started cleaning rooms it wasn't asked to (a firmware hiccup) — "
+                    "sent it back to the dock.",
+                    high_priority=True,
+                )
+            return
+
         # An 'interrupting' run was already sent home — but the firmware can
         # auto-resume the paused segment task on its own (seen live 2026-07-08).
         # Keep enforcing the dock while someone is home, mirroring the
@@ -950,10 +1718,11 @@ class SchedulerEngine:
             return
 
         # Someone came home mid-run → retreat to the dock so we don't annoy them.
-        # Manual runs opt out (user tapped "clean now") — EXCEPT once a run has
-        # docked to recharge and auto-resumed: that "clean now" intent is stale
-        # hours later, so a recharge-resumed manual run steps aside like any other.
-        if ((run.get("kind") != "manual" or run.get("was_parked"))
+        # Manual runs opt out (the user tapped "clean now") — EXCEPT once that
+        # intent has gone STALE: it docked to recharge and auto-resumed hours
+        # later, by which point "clean now" no longer reflects what they want.
+        if ((run.get("kind") != "manual" or self._manual_intent_stale(run, now))
+                and not run.get("door_retry_home")
                 and not run.get("interrupting")
                 and bool(self._opt(OPT_RETURN_ON_ARRIVAL, DEFAULT_RETURN_ON_ARRIVAL))
                 and bool(self._opt(OPT_REQUIRE_AWAY, DEFAULT_REQUIRE_AWAY))
@@ -1004,7 +1773,18 @@ class SchedulerEngine:
             # free-timeout elapsed is a false alarm (reverse-out often frees it
             # shortly after). Verified live 2026-07-13: a double-notify (recover +
             # needs-help) fired for one wedge that then self-healed fine.
+            # Is auto-recover actually going to deal with this, or are we about to
+            # stay quiet waiting for a rescue that will never come? Recovery only
+            # touches errors in _RECOVERABLE_ERROR_WORDS, so an UNRECOGNISED error
+            # must alert immediately — never assume the word list covers it.
+            # Live 2026-07-17: a `blocked` error fell through every layer in
+            # silence (not a recover word -> auto-recover skipped it; an error was
+            # active -> the silent-stuck watchdog skipped it; auto-recover was ON
+            # with 0 attempts spent -> this gate assumed recovery had it). Same
+            # shape as the `drop` hole two days earlier. The word list must gate
+            # RECOVERY, never gate ALERTING.
             recover_done = (not bool(self._opt(OPT_AUTO_RECOVER, DEFAULT_AUTO_RECOVER))
+                            or not self._recoverable_error()
                             or int(run.get("recover_count", 0)) >= MAX_RECOVER_ATTEMPTS)
             if recover_done and not run.get("notified_stuck"):
                 run["notified_stuck"] = True
@@ -1015,6 +1795,7 @@ class SchedulerEngine:
                         "⚠️ Vacuum needs help",
                         f"The robot reported an error near {where} during the {run['kind']} clean.",
                         high_priority=True,
+                        actions=self._rescue_actions(),
                     )
             if changed:
                 await self.tracker.async_set_active_run(run)
@@ -1068,14 +1849,16 @@ class SchedulerEngine:
                     and not run.get("interrupting")):
                 if not run.get("parked_since"):
                     run["parked_since"] = now.isoformat()
-                    run["was_parked"] = True   # recharge/dock mid-task; presence exemption ends on resume
+                    # Only a real DOCK visit is a recharge. Stopping mid-floor
+                    # (stuck) is not, and must not age out a manual run's intent.
+                    run["was_parked"] = self._at_dock()
                     await self.tracker.async_set_active_run(run)
                 parked = _parse_iso(run.get("parked_since"))
                 dwell = (now - parked).total_seconds() if parked else 0
                 if dwell < INCOMPLETE_RECORD_DWELL_SECONDS or self._charging_mid_task():
                     self._set_status(
                         "running",
-                        f"{run['kind']} paused at the dock — waiting for the robot to resume",
+                        f"{run['kind']} paused {self._where_parked()} — waiting for the robot to resume",
                     )
                     return
             await self._finalize_run(run, now, record=record,
@@ -1100,7 +1883,9 @@ class SchedulerEngine:
         # failed-to-start if it never became active.
         if not run.get("parked_since"):
             run["parked_since"] = now.isoformat()
-            run["was_parked"] = True   # parked mid-task; presence exemption ends on resume
+            # Only a real DOCK visit counts (see above) — a mid-floor stop is a
+            # stuck robot, not a recharge.
+            run["was_parked"] = self._at_dock()
             await self.tracker.async_set_active_run(run)
         parked = _parse_iso(run.get("parked_since"))
         dwell = (now - parked).total_seconds() if parked else 0
@@ -1115,7 +1900,7 @@ class SchedulerEngine:
                          or self._charging_mid_task())):
                 self._set_status(
                     "running",
-                    f"{run['kind']} paused at the dock — waiting for the robot to resume",
+                    f"{run['kind']} paused {self._where_parked()} — waiting for the robot to resume",
                 )
                 return
             await self._finalize_run(run, now, record=record,
@@ -1134,6 +1919,8 @@ class SchedulerEngine:
         # Remove any temporary no-go boxes we dropped to recover from a wedge —
         # they were for this run only (the furniture that caused it may move).
         await self._clear_temp_nogos(run)
+        # Safety net: never leave the speaker muted if a run ended mid-maneuver.
+        await self._restore_voice(run)
 
         # blocked_rooms from the completion record is the map-derived truth of
         # what couldn't be reached (door/obstacle), keyed by segment id.
@@ -1241,6 +2028,18 @@ class SchedulerEngine:
         _LOGGER.info("dreame_scheduler: %s run done — cleaned %s, skipped %s (area %s)",
                      run["kind"], cleaned, skipped, area)
 
+        # Learn from any traps hit this run — surface a no-go suggestion for a
+        # recurring spot, or a tidy reminder for loose-object beachings. Best-
+        # effort: never let analytics break a completed run's finalisation.
+        try:
+            await self._maybe_surface_learned(now)
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning("trap-learner surfacing failed: %s", exc)
+        try:
+            await self._sync_manual_clean(now)
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning("manual-clean sync failed: %s", exc)
+
     async def _maybe_weekly_notice(self, summary: dict) -> None:
         if not bool(self._opt(OPT_NOTIFY_WEEKLY, DEFAULT_NOTIFY_WEEKLY)):
             return
@@ -1276,6 +2075,53 @@ class SchedulerEngine:
                 f"✅ All {len(all_segs)} rooms were cleaned at least once this week.",
             )
 
+    async def _maybe_surface_learned(self, now: datetime) -> None:
+        """After a run, run the recurring-trap learner over the stuck-event log
+        and SUGGEST (never silently apply — writing to the robot is user-
+        confirmed) a permanent no-go for any spot that has trapped the robot on
+        enough separate runs. One-off / mobile hazards (a pet toy) instead raise
+        a 'tidy the floor' reminder, since a no-go can't fix a thing that moves."""
+        events = list(self.tracker.stuck_events or [])
+        if not events:
+            return
+        try:
+            _walls, zones, _mops = self._current_zones()
+        except ZoneReadError:
+            zones = []   # read-only here (dedup against existing zones); safe to skip
+        report = trap_learner.analyze(events, zones)
+        suggested = self.tracker.learned_suggested
+        promoted = self.tracker.learned_promoted
+        for s in report["nogo_suggestions"]:
+            if s["key"] in suggested or s["key"] in promoted:
+                continue
+            await self.tracker.async_mark_suggested(s["key"], now.isoformat())
+            if bool(self._opt(OPT_NOTIFY_STUCK, DEFAULT_NOTIFY_STUCK)):
+                await self._notify(
+                    "🧠 Recurring trap learned",
+                    f"The robot has got stuck at {s['room']} on {s['runs']} separate "
+                    "runs. Add a permanent no-go there so it stops trying? Apply it "
+                    "from the add-on's Insights tab, or call the "
+                    "dreame_scheduler.apply_learned_nogo service.",
+                )
+        # Tidy reminder — only while beachings are RECENT (a lifetime count would
+        # nag forever off the never-expiring event log). Fires at most once/day,
+        # and goes quiet once the robot hasn't been beached for a couple of days.
+        advice = report.get("tidy_advice") or {}
+        if advice.get("active") and self.tracker.tidy_reminded_on != now.date().isoformat():
+            cutoff = now - timedelta(days=TIDY_RECENCY_DAYS)
+            recent_beach = False
+            for ev in reversed(events):
+                ets = _parse_iso(ev.get("ts"))
+                if ets and ets < cutoff:
+                    break
+                if ev.get("beached"):
+                    recent_beach = True
+                    break
+            if recent_beach:
+                await self.tracker.async_set_tidy_reminded_on(now.date().isoformat())
+                if bool(self._opt(OPT_NOTIFY_STUCK, DEFAULT_NOTIFY_STUCK)):
+                    await self._notify("🧹 Clear the floor before cleans", advice.get("message", ""))
+
     # ----------------------------------------------------- resume + nudge
     async def _try_resume(self, now: datetime, now_min: int, away_ok: bool) -> bool:
         """Finish an interrupted run's remaining rooms once the house is empty
@@ -1300,6 +2146,273 @@ class SchedulerEngine:
         why = reason if not gates_ok else "doors closed"
         self._set_status("waiting", f"waiting to resume remaining rooms ({why})")
         return False
+
+    async def _sync_manual_clean(self, now: datetime) -> None:
+        """Maintain the 'clean by hand' to-do list: rooms the robot persistently
+        CAN'T finish (unreachable — couch-blocked, always-shut door) so the user
+        cleans them and the house is actually clean, rather than a room silently
+        rotting on the pending list. Auto-clears a room the moment it next gets
+        cleaned. Runs after every finalize; pure bookkeeping over data we keep."""
+        if not bool(self._opt(OPT_MANUAL_CLEAN_ENABLED, DEFAULT_MANUAL_CLEAN_ENABLED)):
+            if self.tracker.manual_clean:
+                await self.tracker.async_set_manual_clean({})
+                self._push()
+            return
+        stale_days = self._opt_int(OPT_MANUAL_CLEAN_STALE_DAYS, DEFAULT_MANUAL_CLEAN_STALE_DAYS)
+        min_misses = self._opt_int(OPT_MANUAL_CLEAN_MIN_MISSES, DEFAULT_MANUAL_CLEAN_MIN_MISSES)
+        history = list(self.tracker.history or [])
+        unreachable = self.tracker.unreachable
+        cleaned = self.tracker.cleaned
+        prev = self.tracker.manual_clean
+        targets: dict = {}
+        for seg, cfg in self._rooms().items():
+            if not isinstance(cfg, dict) or not cfg.get(ROOM_ENABLED) or not cfg.get(ROOM_DAYS):
+                continue                                   # only SCHEDULED rooms
+            # Persistent-failure evidence: the worse of the cross-week history
+            # streak and this week's skip strikes.
+            misses = max(hist_a.consecutive_fails(history, str(seg)),
+                         int(unreachable.get(str(seg), 0)))
+            if misses < min_misses:
+                continue
+            # How long since it was actually cleaned (history survives weekly
+            # resets; fall back to this week's cleaned mark).
+            last = hist_a.last_cleaned_ts(history, str(seg)) or cleaned.get(str(seg))
+            last_dt = _parse_iso(last)
+            days = (now - last_dt).days if last_dt else None
+            if days is not None and days < stale_days:
+                continue                                   # cleaned recently enough
+            reason = (f"robot can't reach it — missed {misses}×"
+                      + (f", last cleaned {days}d ago" if days is not None else ", never cleaned"))
+            targets[str(seg)] = {
+                "name": self._room_name(seg),
+                "reason": reason,
+                # keep the original "added" time so the task doesn't churn
+                "added": (prev.get(str(seg), {}) or {}).get("added") or now.isoformat(),
+            }
+        if targets == prev:
+            return
+        new = [t for s, t in targets.items() if s not in prev]
+        await self.tracker.async_set_manual_clean(targets)
+        self._push()                                       # refresh the to-do entity
+        if new and bool(self._opt(OPT_MANUAL_CLEAN_NOTIFY, DEFAULT_MANUAL_CLEAN_NOTIFY)):
+            names = ", ".join(t["name"] for t in new)
+            await self._notify(
+                "🧹 Rooms the robot can't reach",
+                f"Added to your clean-by-hand list: {names}. The robot keeps failing "
+                "to get to them — give them a quick go by hand.",
+            )
+        _LOGGER.info("manual-clean list now: %s", list(targets.keys()))
+
+    def _map_room_centroid(self, seg) -> tuple[int, int] | None:
+        """Map-mm centre of a room segment, from the camera's room table."""
+        rooms = _plain_attr(self._map_attr("rooms"))
+        if not isinstance(rooms, dict):
+            return None
+        r = _plain_attr(rooms.get(str(seg)) or rooms.get(int(seg)) if str(seg).isdigit() else rooms.get(str(seg)))
+        if isinstance(r, dict) and r.get("x") is not None and r.get("y") is not None:
+            return int(r["x"]), int(r["y"])
+        return None
+
+    async def _await_settled(self, timeout: float) -> bool:
+        """Wait (bounded) for the robot to first BEGIN moving, then come to rest —
+        it's arrived, or got as close to the target as it can. Returns True if it
+        actually moved, False if it never left (the goto was refused because the
+        target is unreachable). The initial 'has it started' phase matters: a
+        robot still at the dock reads as already-settled, so without it this
+        returned instantly and the show-unreachable trip looked like a no-op."""
+        start = self._vacuum_position()
+        waited = 0.0
+
+        # Phase 1 — wait for motion to begin (position moves, or it reports busy).
+        moving = False
+        while waited < min(timeout, MOVE_START_SECONDS):
+            pos = self._vacuum_position()
+            if self._robot_busy() or (
+                pos is not None and start is not None
+                and math.hypot(pos[0] - start[0], pos[1] - start[1]) >= STUCK_MIN_ESCAPE_MM
+            ):
+                moving = True
+                break
+            await asyncio.sleep(2.0)
+            waited += 2.0
+        if not moving:
+            return False  # goto refused — robot never left the dock/spot
+
+        # Phase 2 — it's under way; wait for it to come to rest.
+        last = None
+        while waited < timeout:
+            pos = self._vacuum_position()
+            if pos is not None and last is not None and \
+                    math.hypot(pos[0] - last[0], pos[1] - last[1]) < STUCK_MIN_ESCAPE_MM:
+                return True
+            last = pos
+            await asyncio.sleep(3.0)
+            waited += 3.0
+        return True
+
+    def _approach_point(self, seg) -> tuple[int, int] | None:
+        """A proven-REACHABLE point beside an unreachable room: the last place the
+        robot physically stood when it gave up trying to reach it. vacuum_goto to
+        the room's own centroid aborts (it's unreachable by definition), so the
+        robot barely moves; the last stuck coordinate for this room is somewhere
+        it actually reached, so a goto there succeeds and parks it right at the
+        edge of the trouble spot — exactly what 'show me' wants to point at."""
+        name = self._room_name(seg)
+        best = None
+        for ev in (self.tracker.stuck_events or []):
+            if str(ev.get("room")) != str(name):
+                continue
+            x, y = ev.get("x"), ev.get("y")
+            if x is None or y is None:
+                continue
+            best = (int(x), int(y))   # keep the most recent match
+        return best
+
+    async def async_show_unreachable(self, seg: str | None = None) -> None:
+        """LAB: the robot quietly drives to the edge of a room it can't reach and
+        marks the spot with its light, so you can see where a hand-clean is needed.
+
+        It just GOES there — vacuum_goto is a cruise (navigation only, NO cleaning
+        on the way) — and it's SILENT: the speaker is muted for the trip, so no
+        beeps or announcements. The signal at the spot is VISUAL (the fill-light)
+        plus a phone notification. It waits a moment there so you can spot it, then
+        restores the volume and heads home. Experimental, opt-in, Labs-gated."""
+        if not bool(self._opt(OPT_SHOW_UNREACHABLE, DEFAULT_SHOW_UNREACHABLE)):
+            return
+        async with self._eval_lock:
+            if self.tracker.active_run is not None:
+                self._set_status("running", "busy — can't show unreachable now")
+                return
+            targets = self.tracker.manual_clean
+            seg = str(seg) if seg else next(iter(targets), None)
+            if not seg or seg not in targets:
+                return
+            name = (targets[seg] or {}).get("name") or self._room_name(seg)
+            # Aim at a point the robot can actually REACH (where it last got stuck
+            # trying for this room), not the room's centroid — a goto to the
+            # unreachable centroid aborts and the robot barely leaves the dock.
+            target = self._approach_point(seg) or self._map_room_centroid(seg)
+            if target is None:
+                self._set_status("idle", f"can't work out where {name} is on the map")
+                return
+            vol_ent = entity_of("number", self._prefix, SUF_VOLUME)
+            light = entity_of("switch", self._prefix, "fill_light")
+            # Wake-guard: a deep-'Sleeping' robot silently ignores vacuum_goto the
+            # same way it ignores clean_segment — locate to wake it first.
+            status = (self._sval(entity_of("sensor", self._prefix, SUF_STATUS)) or "").lower()
+            if "sleep" in status:
+                await self._svc("vacuum", "locate", {"entity_id": self._vacuum_entity})
+                await self._await_awake(WAKE_SETTLE_SECONDS)
+            # Mute the speaker for the whole trip — keep it silent.
+            saved_vol = None
+            raw = self._sval(vol_ent)
+            try:
+                saved_vol = int(float(raw)) if raw is not None else None
+            except (TypeError, ValueError):
+                saved_vol = None
+            if saved_vol:
+                await self._svc("number", "set_value", {"entity_id": vol_ent, "value": 0})
+            try:
+                await self._svc(DREAME_DOMAIN, "vacuum_goto",
+                                {"entity_id": self._vacuum_entity, "x": target[0], "y": target[1]})
+                self._set_status("running", f"quietly going to show you: {name}")
+                moved = await self._await_settled(150)
+                # Signal at the spot — VISUAL only: fill-light on + a notification.
+                if self.hass.states.get(light):
+                    await self._svc("switch", "turn_on", {"entity_id": light})
+                if moved:
+                    await self._notify(
+                        "🧹 Clean here for me",
+                        f"I've driven to {name} and turned my light on where I'm parked — "
+                        "that's the spot I can't reach. Can you give it a clean by hand?",
+                        high_priority=True,
+                    )
+                else:
+                    # The goto was refused — even the approach point wasn't reachable
+                    # from here right now. Be honest rather than pretend it arrived.
+                    await self._notify(
+                        "🧹 Couldn’t drive to the spot",
+                        f"I tried to show you where {name} is but couldn’t get moving — "
+                        "the way there is blocked from where I am. It still needs a "
+                        "clean by hand.",
+                        high_priority=True,
+                    )
+                _LOGGER.info("show-unreachable: moved=%s at %s for %s",
+                             moved, self._vacuum_position(), name)
+                await asyncio.sleep(SHOW_DWELL_SECONDS)   # stay so you can spot it
+            finally:
+                if self.hass.states.get(light):
+                    await self._svc("switch", "turn_off", {"entity_id": light})
+                if saved_vol:
+                    await self._svc("number", "set_value", {"entity_id": vol_ent, "value": saved_vol})
+                await self._svc("vacuum", "return_to_base", {"entity_id": self._vacuum_entity})
+
+    async def async_manual_room_done(self, seg: str) -> None:
+        """User ticked a room off the 'clean by hand' list — credit it as cleaned
+        (which also clears its skip strike) and drop it from the list."""
+        seg = str(seg)
+        await self.tracker.async_mark_cleaned([seg], dt_util.now().isoformat())
+        mc = dict(self.tracker.manual_clean)
+        if mc.pop(seg, None) is not None:
+            await self.tracker.async_set_manual_clean(mc)
+        self._push()
+        _LOGGER.info("manual-clean: %s marked done by hand", seg)
+
+    def _push(self) -> None:
+        if self._notify_update:
+            self._notify_update()
+
+    async def _maybe_prerun_announce(self, now: datetime, weekday: int, now_min: int) -> None:
+        """Fire the 'tidy the room before it cleans' heads-up once/day, at the
+        trigger the user picked to fit their routine. The run itself is presence-
+        gated, so the point is to reach someone while they're still HOME with time
+        to clear loose pet toys / cables the robot can't map around."""
+        if not bool(self._opt(OPT_PRERUN_ENABLED, DEFAULT_PRERUN_ENABLED)):
+            return
+        today_iso = now.date().isoformat()
+        if self.tracker.prerun_announced == today_iso:
+            return
+
+        mode = str(self._opt(OPT_PRERUN_MODE, DEFAULT_PRERUN_MODE) or DEFAULT_PRERUN_MODE)
+        daily = str(self._opt(OPT_DAILY_TIME, DEFAULT_DAILY_TIME))
+        if mode == "lead":
+            daily_min = clean_window.to_minutes(daily)
+            fire_min = max(0, (daily_min or 0)
+                           - self._opt_int(OPT_PRERUN_LEAD_MIN, DEFAULT_PRERUN_LEAD_MIN))
+            target_weekday, tomorrow = weekday, False
+        elif mode == "evening_before":
+            fire_min = clean_window.to_minutes(self._opt(OPT_PRERUN_TIME, DEFAULT_PRERUN_TIME))
+            target_weekday, tomorrow = (weekday + 1) % 7, True
+        else:  # "morning"
+            fire_min = clean_window.to_minutes(self._opt(OPT_PRERUN_TIME, DEFAULT_PRERUN_TIME))
+            target_weekday, tomorrow = weekday, False
+        if fire_min is None:
+            return
+        # Fire on the first tick at/after the trigger minute, within a 90-min
+        # window (so a late HA start the same day still sends it); the once/day
+        # guard stops repeats, and the date rolling over re-arms it next day.
+        if not (fire_min <= now_min < fire_min + 90):
+            return
+
+        due = [s for s in rooms_due_today(self._rooms(), target_weekday)
+               if s not in self.tracker.cleaned]
+        # Mark announced regardless, so we don't re-scan every tick in the window.
+        await self.tracker.async_set_prerun_announced(today_iso)
+        if not due:
+            return
+        names = ", ".join(self._room_name(s) for s in due)
+        require_away = bool(self._opt(OPT_REQUIRE_AWAY, DEFAULT_REQUIRE_AWAY))
+        if tomorrow:
+            title, when = "🧹 Vacuum cleans tomorrow", "tomorrow"
+        else:
+            title = "🧹 Vacuum cleans today"
+            when = (f"today (from ~{daily}, once everyone's out)"
+                    if require_away else f"today from ~{daily}")
+        await self._notify(
+            title,
+            f"Scheduled to clean {names} {when}. A quick tidy — clear pet toys, "
+            "cables and socks off the floor — keeps it from getting stuck.",
+        )
 
     async def _maybe_stale_nudge(self, now: datetime, away_ok: bool) -> None:
         """When the house can't be cleaned because people are always home, and
@@ -1404,6 +2517,45 @@ class SchedulerEngine:
         await self.tracker.async_reset_week(week_start_for(now.date(), week_start_day).isoformat())
         self._set_status(self._status.get("state", "idle"), "week counters reset")
 
+    async def async_apply_learned_nogo(self, key: str | None = None) -> dict:
+        """User-confirmed: turn recurring-trap suggestion(s) into a PERMANENT
+        no-go on the robot's map. This WRITES to the robot, so it only runs when
+        the user asks (service / Insights button), per the safety rule — the
+        learner never applies one on its own. With no key, applies every pending
+        suggestion. Returns a small summary for the GUI."""
+        async with self._eval_lock:
+            events = list(self.tracker.stuck_events or [])
+            try:
+                walls, zones, no_mops = self._current_zones()
+            except ZoneReadError as exc:
+                # Never write a partial zone list — the service replaces them all.
+                _LOGGER.warning("apply_learned_nogo: aborting, zone read failed: %s", exc)
+                return {"applied": 0, "rooms": [], "error": "could not read existing zones"}
+            report = trap_learner.analyze(events, zones)
+            promoted = self.tracker.learned_promoted
+            todo = [s for s in report["nogo_suggestions"]
+                    if s["key"] not in promoted and (key is None or s["key"] == key)]
+            if not todo:
+                return {"applied": 0, "rooms": []}
+            try:
+                await self._svc("dreame_vacuum", "vacuum_backup_map",
+                                {"entity_id": self._vacuum_entity})
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.warning("apply_learned_nogo: map backup failed: %s", exc)
+            boxes = [s["box"] for s in todo]
+            await self._write_zones(walls, zones + boxes, no_mops)
+            now_iso = dt_util.now().isoformat()
+            for s in todo:
+                await self.tracker.async_mark_promoted(s["key"], now_iso)
+            names = ", ".join(sorted({s["room"] for s in todo}))
+            await self._notify(
+                "✅ Learned no-go added",
+                f"Walled off {len(todo)} recurring trap(s): {names}. The robot will "
+                "now route around them.",
+            )
+            _LOGGER.info("apply_learned_nogo: added %d no-go(s): %s", len(todo), names)
+            return {"applied": len(todo), "rooms": [s["room"] for s in todo]}
+
     async def async_set_enabled(self, value: bool) -> None:
         await self.tracker.async_set_enabled(value)
         await self._tick()
@@ -1500,24 +2652,120 @@ class SchedulerEngine:
             "robot": self.robot_snapshot(),
             "presence_home": presence_home,
             "presence_configured": bool(self._presence_entities()),
+            "manual_clean": dict(self.tracker.manual_clean),   # rooms to clean by hand
             "next_run": nxt.isoformat() if nxt else None,
             "next_run_day": WEEKDAYS[nxt.weekday()] if nxt else None,
             "next_run_time": nxt.strftime("%H:%M") if nxt else None,
         }
+
+    # ------------------------------------------- actionable notification buttons
+    def _action_id(self, name: str) -> str:
+        """Notification action ids are matched GLOBALLY by the mobile app, so
+        scope them to this entry — otherwise tapping 'Send home' on one robot's
+        alert would drive every other robot in the house too."""
+        return f"DREAME_{name}_{self.entry.entry_id}"
+
+    def _rescue_actions(self) -> list[dict]:
+        """Buttons for a needs-help alert, so the notification IS the rescue."""
+        return [
+            {"action": self._action_id("SEND_HOME"), "title": "Send home"},
+            {"action": self._action_id("RESUME"), "title": "Resume clean"},
+        ]
+
+    @callback
+    def _handle_notification_action(self, event: Event) -> None:
+        action = str(event.data.get("action") or "")
+        if action == self._action_id("SEND_HOME"):
+            self.hass.async_create_task(self._notification_send_home())
+        elif action == self._action_id("RESUME"):
+            self.hass.async_create_task(self._notification_resume())
+
+    async def _notification_send_home(self) -> None:
+        _LOGGER.info("notification action: send home")
+        await self._svc("vacuum", "return_to_base", {"entity_id": self._vacuum_entity})
+        self._set_status("returning", "sending it home (tapped from the alert)")
+        await self._tick()
+
+    async def _notification_resume(self) -> None:
+        _LOGGER.info("notification action: resume clean")
+        # Resume the tracked run's own segments — never a bare vacuum.start.
+        await self._resume_run(self.tracker.active_run)
+        self._set_status("running", "resuming the clean (tapped from the alert)")
+        await self._tick()
 
     def _set_status(self, state: str, reason: str) -> None:
         self._status = {"state": state, "reason": reason, "enabled": self.tracker.enabled}
         if self._notify_update:
             self._notify_update()
 
-    async def _notify(self, title: str, message: str, high_priority: bool = False) -> None:
+    def _obstacle_snapshot(self, pos: tuple[int, int] | None) -> tuple[str, str | None, int] | None:
+        """The nearest thing the robot PHOTOGRAPHED to `pos`: (label, url, mm).
+
+        The robot's AI already records what it sees — coordinates, a label AND a
+        picture — and shows nobody. When it stops, that photo is the single most
+        useful thing we can put in front of the user: not "it's blocked
+        somewhere, go hunt", but a picture of the actual object and the room it's
+        in. Live 2026-07-17 it had quietly photographed the two rope toys
+        blocking the Entrance the entire time it was failing to get past them
+        (and labelled one of them "Power Strip %46" — a frayed rope reads as a
+        cable bundle to its classifier, which is exactly why it can SEE the thing
+        and still have no idea to route around it)."""
+        if pos is None:
+            return None
+        # index -> (label, url), keyed off the picture label's leading "N: "
+        pics: dict[str, tuple[str, str]] = {}
+        raw_pics = self._map_attr("obstacle_picture")
+        if isinstance(raw_pics, dict):
+            for label, url in raw_pics.items():
+                idx = str(label).split(":", 1)[0].strip()
+                if idx and url:
+                    pics[idx] = (str(label), str(url))
+        best = None
+        raw = self._map_attr("obstacles")
+        if isinstance(raw, dict):
+            for key, val in raw.items():
+                o = _plain_attr(val)          # Obstacle is an OBJECT in-process
+                if not isinstance(o, dict):
+                    continue
+                try:
+                    ox, oy = float(o["x"]), float(o["y"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                dist = int(math.hypot(ox - pos[0], oy - pos[1]))
+                if dist > OBSTACLE_MATCH_MM:
+                    continue
+                if best is None or dist < best[2]:
+                    label, url = pics.get(str(key), (None, None))
+                    if not label:
+                        label = str(o.get("type") or "something")
+                        if o.get("room"):
+                            label += f" ({o['room']})"
+                    # only offer a photo the robot actually uploaded
+                    if str(o.get("picture_status", "")).lower() not in ("uploaded", ""):
+                        url = None
+                    best = (label, url, dist)
+        return best
+
+    async def _notify(self, title: str, message: str, high_priority: bool = False,
+                      actions: list[dict] | None = None, image: str | None = None) -> None:
         # high_priority asks the mobile app to bypass Android Doze / iOS batching
         # so a stuck/needs-help alert arrives now, not 30+ min later. Harmless on
         # persistent_notification, which just ignores the extra data.
-        extra = {}
+        # `actions` puts real buttons on the push (Send home / Resume), so a
+        # rescue alert can BE the rescue instead of sending you off to hunt for a
+        # control in the app. Tapping one fires mobile_app_notification_action,
+        # which _handle_notification_action turns into a command.
+        data: dict = {}
         if high_priority:
-            extra = {"data": {"ttl": 0, "priority": "high",
-                              "push": {"interruption-level": "time-sensitive"}}}
+            data.update({"ttl": 0, "priority": "high",
+                         "push": {"interruption-level": "time-sensitive"}})
+        if actions:
+            data["actions"] = actions
+        if image:
+            # A picture of the actual thing in its way beats any wording we could
+            # write. The mobile app resolves a relative /api/ path against HA.
+            data["image"] = image
+        extra = {"data": data} if data else {}
         for name in self._notify_names():
             try:
                 if name == "persistent_notification":
@@ -1553,6 +2801,25 @@ def _parse_iso(value: str | None) -> datetime | None:
         return dt_util.parse_datetime(value)
     except (TypeError, ValueError):
         return None
+
+
+def _plain_attr(v):
+    """Coerce a map-camera attribute to plain JSON types.
+
+    The dreame map camera stores Point / Area / Line as OBJECTS in-process —
+    they only turn into dicts when serialised out to REST / the frontend. So an
+    isinstance(dict) check silently drops every one of them, which is why the
+    engine read the robot's position as None on every stuck event, and read the
+    user's zones back as an EMPTY list (a write then wipes them, since
+    vacuum_set_restricted_zone replaces the whole list). Mirrors report._plain().
+    """
+    as_dict = getattr(v, "as_dict", None)
+    if callable(as_dict):
+        try:
+            return as_dict()
+        except Exception:  # noqa: BLE001
+            return None
+    return v
 
 
 def _parse_area(value) -> float | None:

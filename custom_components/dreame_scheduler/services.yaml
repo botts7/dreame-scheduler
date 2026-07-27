@@ -92,6 +92,34 @@ clean_rooms:
           integration: dreame_vacuum
           domain: vacuum
 
+apply_learned_nogo:
+  name: Apply a learned no-go zone
+  description: >-
+    Turn the recurring-trap learner's suggestion(s) into a PERMANENT no-go on the
+    robot's map (backs the map up first). Only spots the robot has got stuck at on
+    several separate runs are suggested; a one-off / moving obstacle never is.
+    With no key, applies every pending suggestion.
+  fields:
+    key:
+      name: Suggestion key
+      description: >-
+        Apply just one suggestion (its key, as shown in the Insights tab). Leave
+        empty to apply every pending learned no-go.
+      required: false
+      example: "Lounge Room2@6900,7300"
+      selector:
+        text:
+    vacuum:
+      name: Vacuum
+      description: >-
+        Target a specific robot in a multi-vacuum home. Leave empty for all.
+      required: false
+      example: vacuum.dreamebot_l20_ultra
+      selector:
+        entity:
+          integration: dreame_vacuum
+          domain: vacuum
+
 get_config:
   name: Get scheduler configuration
   description: >-

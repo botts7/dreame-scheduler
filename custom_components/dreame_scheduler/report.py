@@ -25,6 +25,7 @@ from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.util import dt as dt_util
 
 from . import history_analytics as hist_a
+from . import trap_learner
 from .const import (
     CONF_PREFIX,
     CONF_VACUUM_ENTITY,
@@ -321,6 +322,37 @@ def build_report(hass: HomeAssistant, entry: ConfigEntry, engine) -> dict:
                            + " — add a no-go/door sensor or check access.",
             })
 
+    # Recurring-trap learner: cluster the stuck-event log against the robot's
+    # current no-go zones. Fixed traps (recurred across runs) become an apply-able
+    # no-go suggestion; loose-object beachings become a tidy reminder.
+    stuck_events = list(getattr(tracker, "stuck_events", []) or [])
+    existing_zones = [engine._area_to_rect(z) for z in (map_attrs.get("no_go_areas") or [])]
+    existing_zones = [z for z in existing_zones if z]
+    learn = trap_learner.analyze(stuck_events, existing_zones)
+    promoted = dict(getattr(tracker, "learned_promoted", {}) or {})
+    for s in learn["nogo_suggestions"]:
+        if s["key"] in promoted:
+            continue
+        suggestions.append({
+            "seg": None, "name": s["room"], "type": "learned_nogo", "key": s["key"],
+            "message": f"{s['room']}: the robot has got stuck here on {s['runs']} separate "
+                       "runs. Apply a permanent no-go to route it around this spot.",
+            "apply_service": "dreame_scheduler.apply_learned_nogo",
+        })
+    for pb in learn.get("path_blocks", []):
+        suggestions.append({
+            "seg": None, "name": pb["room"], "type": "path_block", "key": pb["key"],
+            "message": f"{pb['room']}: the robot keeps failing to route past a spot here "
+                       f"(blocked on {pb['runs']} separate runs) but never physically "
+                       "reaches it — likely unmapped furniture. A virtual wall or moving "
+                       "the item fixes this; a no-go would only wall off open floor.",
+        })
+    if (learn.get("tidy_advice") or {}).get("active"):
+        suggestions.append({
+            "seg": None, "name": None, "type": "tidy_floor",
+            "message": learn["tidy_advice"]["message"],
+        })
+
     return {
         "found": True,
         "entry_id": entry.entry_id,
@@ -331,6 +363,16 @@ def build_report(hass: HomeAssistant, entry: ConfigEntry, engine) -> dict:
         "rooms": rooms_out,
         "totals": totals,
         "suggestions": suggestions,
+        # Recurring-trap learner output for the Insights view.
+        "trap_suggestions": learn["nogo_suggestions"],
+        "path_blocks": learn.get("path_blocks", []),
+        # Rooms the robot can't reach — for the "clean by hand" list AND for
+        # shading those room segments red on the Insights/Map view.
+        "manual_clean": dict(getattr(tracker, "manual_clean", {}) or {}),
+        "trap_clusters": learn["clusters"],
+        "tidy_advice": learn.get("tidy_advice"),
+        "stuck_events": [_plain(ev) for ev in stuck_events[-100:]],
+        "learned_promoted": promoted,
         "runs_logged": len(history),
         # Raw run log (capped in the tracker) — powers the GUI's run-history
         # timeline + weekday trend. _plain() keeps it JSON-safe.

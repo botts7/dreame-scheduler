@@ -52,7 +52,14 @@ def _empty_state() -> dict:
         "resume": None,         # {"segments": [...], "kind": "..."} to finish when empty
         "history": [],          # capped run log: [{ts, weekday, kind, per_room:{seg:{...}}}]
         "stuck_events": [],     # capped stuck/recovery log for the learning engine:
-                                # [{ts, room, x, y, error, kind, attempt}]
+                                # [{ts, room, x, y, error, kind, attempt, run_id, beached}]
+        "learned_suggested": {},  # trap-learner suggestion keys already notified -> iso ts
+        "learned_promoted": {},   # trap-learner keys promoted to a permanent no-go -> iso ts
+        "tidy_reminded_on": None, # date we last sent a "clear the floor" reminder (once/day)
+        "prerun_announced": None, # date we last sent the pre-run tidy heads-up (once/day)
+        "manual_clean": {},       # rooms the robot can't reach -> {seg: {name, reason, added}}
+        "mop_counters": {},       # per-room mop cadence -> {seg: {count:int, date:"YYYY-MM-DD"}}
+        "door_deferred": {},      # rooms skipped today for a shut door -> {seg: {date, retries}}
     }
 
 
@@ -215,3 +222,84 @@ class WeekTracker:
         if len(evs) > cap:
             del evs[: len(evs) - cap]
         await self.async_save()
+
+    # ---- trap-learner bookkeeping (which suggestions were surfaced / applied) --
+    @property
+    def learned_suggested(self) -> dict:
+        return self._state.setdefault("learned_suggested", {})
+
+    @property
+    def learned_promoted(self) -> dict:
+        return self._state.setdefault("learned_promoted", {})
+
+    async def async_mark_suggested(self, key: str, ts: str) -> None:
+        self.learned_suggested[str(key)] = ts
+        await self.async_save()
+
+    async def async_mark_promoted(self, key: str, ts: str) -> None:
+        self.learned_promoted[str(key)] = ts
+        await self.async_save()
+
+    @property
+    def tidy_reminded_on(self) -> str | None:
+        return self._state.get("tidy_reminded_on")
+
+    async def async_set_tidy_reminded_on(self, iso_date: str | None) -> None:
+        self._state["tidy_reminded_on"] = iso_date
+        await self.async_save()
+
+    @property
+    def prerun_announced(self) -> str | None:
+        return self._state.get("prerun_announced")
+
+    async def async_set_prerun_announced(self, iso_date: str | None) -> None:
+        self._state["prerun_announced"] = iso_date
+        await self.async_save()
+
+    # ---- manual-clean targets (rooms the robot can't reach) ----
+    @property
+    def manual_clean(self) -> dict:
+        return self._state.setdefault("manual_clean", {})
+
+    async def async_set_manual_clean(self, targets: dict) -> None:
+        self._state["manual_clean"] = dict(targets or {})
+        await self.async_save()
+
+    # ---- per-room mop cadence counters ----
+    @property
+    def mop_counters(self) -> dict:
+        return self._state.setdefault("mop_counters", {})
+
+    async def async_set_mop_counter(self, seg, count: int, date_iso: str) -> None:
+        """Record that room ``seg`` was swept on ``date_iso``, its cadence
+        counter now at ``count``. One write per dispatched room per day."""
+        self.mop_counters[str(seg)] = {"count": int(count), "date": date_iso}
+        await self.async_save()
+
+    # ---- door-retry deferral (rooms skipped for a shut door) ----
+    @property
+    def door_deferred(self) -> dict:
+        return self._state.setdefault("door_deferred", {})
+
+    async def async_mark_door_deferred(self, segments, date_iso: str) -> None:
+        """Note rooms skipped today for a closed door, so the engine can retry
+        them once the door reopens. Preserves an existing same-day retry count."""
+        changed = False
+        for seg in segments:
+            cur = self.door_deferred.get(str(seg))
+            if not isinstance(cur, dict) or cur.get("date") != date_iso:
+                self.door_deferred[str(seg)] = {"date": date_iso, "retries": 0}
+                changed = True
+        if changed:
+            await self.async_save()
+
+    async def async_bump_door_retry(self, seg, date_iso: str) -> None:
+        cur = self.door_deferred.get(str(seg))
+        n = int(cur.get("retries", 0)) if isinstance(cur, dict) else 0
+        self.door_deferred[str(seg)] = {"date": date_iso, "retries": n + 1}
+        await self.async_save()
+
+    async def async_clear_door_deferred(self, seg) -> None:
+        if str(seg) in self.door_deferred:
+            self.door_deferred.pop(str(seg), None)
+            await self.async_save()
