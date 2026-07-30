@@ -62,6 +62,14 @@ room and signals there so you can find the blockage.
 - CI: `actions/checkout` v4 → v7 (clears the Node 20 deprecation).
 - Added GitHub issue templates (bug report + feature request).
 
+### Thanks
+- **[dreacon34](https://www.reddit.com/user/dreacon34)** (Reddit) — for the idea of
+  driving the schedule off HA sensors to detect room availability, and
+  re-attempting a room later instead of skipping it (shaped the door-sensor skip,
+  the opt-in door-retry, and the adaptive-scheduling direction).
+- **DatRandomBoi ("Anton")** (HA Community) — for the per-room "mop every N
+  sweeps" cadence.
+
 ## [0.1.1] — 2026-07-10
 
 Branding and packaging release — no behaviour changes.

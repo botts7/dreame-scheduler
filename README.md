@@ -161,6 +161,19 @@ verification in progress.
 - Map-based partial resume — continue only the un-cleaned area after an
   interrupt, instead of redoing whole rooms.
 
+## Acknowledgements
+
+Shaped by community suggestions — thank you:
+
+- **[dreacon34](https://www.reddit.com/user/dreacon34)** (Reddit) — for the idea of
+  driving the schedule off Home Assistant sensors to detect whether a room is
+  actually available (doors open, etc.) rather than fixed timing, and
+  **re-attempting a room later** (same day or later in the week) instead of just
+  skipping it. This shaped the door-sensor skip, the opt-in door-retry, and the
+  adaptive-scheduling direction.
+- **DatRandomBoi ("Anton")** (Home Assistant Community) — for the per-room
+  **"mop every N sweeps"** cadence, mirroring a two-slider sweep/mop setup.
+
 ## License
 
 MIT
