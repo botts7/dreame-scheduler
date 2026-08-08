@@ -186,6 +186,34 @@ check("suggest_better_day none w/ too little data", ha.suggest_better_day(H, "13
 check("suggest_better_day none when already on good day",
       ha.suggest_better_day(H, "6", [5]) is None)
 
+# --- evaluate_progress ("can't get home" watchdog productivity) --------------
+MM = 80  # STUCK_MIN_ESCAPE_MM
+
+# First call seeds the tracker and is always "productive".
+r0, p0 = sc.evaluate_progress(None, "t0", prog=0.0, area=0.0, dist=200.0, min_escape_mm=MM)
+check("evaluate_progress seeds tracker productive", p0 is True and r0["anchor_dist"] == 200.0)
+
+# Slow-but-real cleaning: area flat, but progress % climbs -> productive (the bug we fixed).
+r1, p1 = sc.evaluate_progress(dict(r0), "t1", prog=1.0, area=0.0, dist=3000.0, min_escape_mm=MM)
+check("evaluate_progress progress%% climb = productive", p1 is True)
+
+# Totally flat mid-clean (prog, area unchanged; moving AWAY from dock) -> NOT productive.
+seed = {"since": "t0", "anchor_dist": 3000.0, "best_area": 5.0, "best_prog": 20.0, "notified": False}
+r2, p2 = sc.evaluate_progress(dict(seed), "t2", prog=20.0, area=5.0, dist=3200.0, min_escape_mm=MM)
+check("evaluate_progress flat + moving away = not productive", p2 is False)
+
+# Netting closer to the dock (return home) -> productive, and the anchor re-sets.
+r3, p3 = sc.evaluate_progress(dict(seed), "t3", prog=20.0, area=5.0, dist=2800.0, min_escape_mm=MM)
+check("evaluate_progress closer to dock = productive", p3 is True and r3["anchor_dist"] == 2800.0)
+
+# A sub-threshold nudge toward the dock (< min_escape_mm) is NOT productive.
+r4, p4 = sc.evaluate_progress(dict(seed), "t4", prog=20.0, area=5.0, dist=2950.0, min_escape_mm=MM)
+check("evaluate_progress tiny nudge (<80mm) = not productive", p4 is False)
+
+# Missing readings (None) never count as progress on their own.
+r5, p5 = sc.evaluate_progress(dict(seed), "t5", prog=None, area=None, dist=None, min_escape_mm=MM)
+check("evaluate_progress all-None = not productive", p5 is False)
+
 print()
 print("RESULT:", "ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}")
 sys.exit(1 if fails else 0)

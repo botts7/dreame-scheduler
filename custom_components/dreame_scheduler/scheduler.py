@@ -270,3 +270,47 @@ def _seg_sort_key(seg: str):
         return (0, int(seg))
     except (TypeError, ValueError):
         return (1, str(seg))
+
+
+def evaluate_progress(ref, now_iso, prog, area, dist, min_escape_mm):
+    """Decide whether a robot that's away from the dock is still getting somewhere.
+
+    Pure helper for the "can't get home" watchdog. Returns ``(ref, productive)``:
+    ``ref`` is the running tracker dict (created here on the first call), and
+    ``productive`` is True when the robot made real headway since the last
+    productive moment — so the caller re-arms its stall timer.
+
+    Productive = ANY of:
+      * task-progress % climbed above the best seen (``prog`` — fine-grained, so
+        slow-but-real cleaning still counts and never false-trips), or
+      * cleaned m² climbed above the best seen (``area``), or
+      * it netted ``min_escape_mm`` closer to the dock than the anchor distance.
+
+    The distance anchor is reset to the current distance on every productive
+    moment (never left pinned at the dock, where the run begins), so a genuine
+    return home reads as productive while a stuck/circling return does not.
+    ``None`` readings are simply ignored (a missing sensor never counts as
+    progress and never counts as a stall on its own)."""
+    if ref is None:
+        return ({
+            "since": now_iso,
+            "anchor_dist": dist,
+            "best_area": area if area is not None else -1.0,
+            "best_prog": prog if prog is not None else -1.0,
+            "notified": False,
+        }, True)
+    productive = False
+    if prog is not None and prog > ref["best_prog"]:
+        ref["best_prog"] = prog
+        productive = True
+    if area is not None and area > ref["best_area"]:
+        ref["best_area"] = area
+        productive = True
+    if (dist is not None and ref.get("anchor_dist") is not None
+            and dist < ref["anchor_dist"] - min_escape_mm):
+        productive = True
+    if productive:
+        ref["since"] = now_iso
+        ref["anchor_dist"] = dist
+        ref["notified"] = False
+    return (ref, productive)

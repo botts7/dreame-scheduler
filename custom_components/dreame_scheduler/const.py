@@ -48,6 +48,11 @@ OPT_MAP_RESUME: Final = "map_resume"                 # (beta) resume un-cleaned 
 
 # Vacuum-before-mop (avoid smearing dust into mud)
 OPT_VACUUM_BEFORE_MOP: Final = "vacuum_before_mop"    # sweep whole area, then mop (global sequential mode)
+# Honor the robot's OWN native per-room settings (mode/mop/suction set in the
+# Dreame app) instead of the scheduler imposing its own. On by default: the
+# scheduler should say WHICH rooms + WHEN, and let the robot clean each the way
+# you configured it natively (so a room you set to sweep-only stays sweep-only).
+OPT_HONOR_NATIVE: Final = "honor_native"
 
 # Auto-recovery: if the robot wedges (forward_suffocate etc.), wall off the spot
 # with a temporary no-go, free it, and carry on the clean instead of docking.
@@ -156,6 +161,7 @@ DEFAULT_NOTIFY_STUCK: Final = True
 DEFAULT_NOTIFY_SKIPPED: Final = True
 DEFAULT_NOTIFY_WEEKLY: Final = True
 DEFAULT_VACUUM_BEFORE_MOP: Final = False
+DEFAULT_HONOR_NATIVE: Final = True      # respect the robot's own per-room settings by default
 DEFAULT_ROOM_MOP_EVERY: Final = 1       # per-room mop cadence: 1 = mop on every clean (off)
 DEFAULT_DOOR_RETRY_ENABLED: Final = False   # opt-in: don't retry door-skipped rooms early unless asked
 DEFAULT_DOOR_RETRY_MIN: Final = 30          # door open this long => room likely clear, safe to retry

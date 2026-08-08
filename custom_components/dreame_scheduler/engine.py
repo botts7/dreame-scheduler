@@ -52,6 +52,7 @@ from .const import (
     DEFAULT_PRERUN_MODE,
     DEFAULT_PRERUN_TIME,
     DEFAULT_VACUUM_BEFORE_MOP,
+    DEFAULT_HONOR_NATIVE,
     DEFAULT_AUTO_RECOVER,
     DEFAULT_QUIET_RECOVERY,
     DEFAULT_ROOM_MOP_EVERY,
@@ -106,6 +107,7 @@ from .const import (
     OPT_STALE_AFTER_DAYS,
     OPT_STALE_NUDGE_ENABLED,
     OPT_VACUUM_BEFORE_MOP,
+    OPT_HONOR_NATIVE,
     OPT_AUTO_RECOVER,
     OPT_QUIET_RECOVERY,
     OPT_WEEK_START_DAY,
@@ -144,6 +146,7 @@ from .scheduler import (
     all_enabled_segments,
     choose_dispatch,
     door_open_long_enough,
+    evaluate_progress,
     is_mopping_mode,
     needs_week_rollover,
     pending_rooms,
@@ -222,6 +225,11 @@ OBSTACLE_MATCH_MM = 2500
 _BEACH_ERROR_WORDS = (
     "drop", "cliff", "lifted", "lift", "tilt", "picked", "pick_up", "high",
 )
+# Hardware/motor faults a reverse-out CANNOT fix — a wheel-motor error means
+# something's tangled/jammed in a wheel or the motor overloaded (live 2026-08-03:
+# 'right_wheel_motor' on a rug with wet mop pads). Reversing achieves nothing and
+# then mis-reads as "beached", so catch these first and ask for a physical check.
+_HARDWARE_ERROR_WORDS = ("wheel_motor",)
 REVERSE_OUT_STEPS = 3              # remote-control reverse nudges to back off a trap
 REVERSE_OUT_VELOCITY = -110       # straight reverse (negative), retracing the entry route
 MAX_RECOVER_ATTEMPTS = 3            # per run, before giving up and docking
@@ -259,6 +267,14 @@ SILENT_STUCK_SECONDS = 360
 # and sat there ALL NIGHT with no alert, because the engine had closed the books.
 STRANDED_SECONDS = 900
 DOCK_RADIUS_MM = 600               # within this of the charger counts as "home"
+# NO-PROGRESS: the robot is off the dock and, for this long, has neither cleaned
+# more area NOR got any closer to the dock — it's moving but achieving nothing
+# (circling, repositioning in place, Blocked while trying to return). The other
+# watchdogs miss this because any twitch re-arms their "did it move" check; this
+# one measures PRODUCTIVE progress instead, and runs for manual/native runs too.
+# Live 2026-08-08: after a reposition it inched around a no-go for many minutes,
+# then wedged, with no alert. Longer than the others so it's a clean backstop.
+NO_PROGRESS_SECONDS = 480
 # How recent a beaching must be for the "tidy the floor" reminder to keep firing.
 TIDY_RECENCY_DAYS = 2
 # How long the "show me where I'm stuck" robot waits at the spot (light on) so
@@ -298,6 +314,16 @@ class SchedulerEngine:
         self._stranded_pos: tuple[int, int] | None = None
         self._stranded_since: datetime | None = None
         self._stranded_notified = False
+        # A high-priority "needs help" alert has fired and not yet been resolved —
+        # set True by any rescue notify, cleared with an "all clear" once the robot
+        # has recovered and made it back to the dock (see _maybe_all_clear).
+        self._help_pending = False
+        # Productivity tracker for _watch_no_progress: the robot's best (closest)
+        # distance-to-dock and most cleaned-area seen this episode, plus when that
+        # last improved. Catches a robot that's MOVING but getting nowhere (circling,
+        # repositioning in place, Blocked while returning) — which the movement-based
+        # watchdogs miss because a twitch re-arms them. Reset when it docks.
+        self._progress_ref: dict | None = None
         # Serialises evaluations AND manual actions: state-event re-evaluations
         # can land while a tick is still awaiting mid-finalise (double-banking
         # rooms + duplicate history entries, seen live 2026-07-09), and a manual
@@ -451,6 +477,15 @@ class SchedulerEngine:
             return False
         err = (self._sval(entity_of("sensor", self._prefix, SUF_ERROR)) or "").lower()
         return bool(err) and any(w in err for w in _BEACH_ERROR_WORDS)
+
+    def _hardware_error(self) -> bool:
+        """True if the vacuum is in error AND the text is a hardware/motor fault
+        (e.g. 'right_wheel_motor') that no manoeuvre can clear — needs a physical
+        check (something tangled in a wheel, or a motor overload), not a nudge."""
+        if not self._error_active():
+            return False
+        err = (self._sval(entity_of("sensor", self._prefix, SUF_ERROR)) or "").lower()
+        return bool(err) and any(w in err for w in _HARDWARE_ERROR_WORDS)
 
     # -------- map reads / zone writes (for auto-recovery no-go placement) -----
     def _map_attr(self, key: str):
@@ -660,17 +695,44 @@ class SchedulerEngine:
             return int(math.hypot(after[0] - before[0], after[1] - before[1]))
         return 0
 
-    async def _handle_beached(self, run: dict, now: datetime) -> bool:
-        """The robot is high-centred / lifted off the floor. No command can free
-        it (reverse-out returns 0 mm — proven live 2026-07-15), so don't burn
-        recovery attempts: alert once for a manual lift and hold. Runs regardless
-        of the auto-recover option — there's nothing to auto-recover."""
+    async def _handle_beached(self, run: dict, now: datetime, cause: str = "beached") -> bool:
+        """The robot has stopped somewhere it can't get out of on its own. No
+        manoeuvre helps, so alert once and hold. ``cause`` tailors the message so
+        we don't mislead:
+
+          * "beached"  — high-centred, wheels off the floor: needs a manual lift.
+          * "stuck"    — reverse-out achieved nothing but there's no drop sensor:
+                         it's wedged and can't free itself; ask for a look, don't
+                         claim "wheels off the floor" (that wording over-stated it).
+          * "hardware" — a wheel-motor/hardware fault: something tangled in a wheel
+                         or a motor overload; ask for a physical check.
+
+        Runs regardless of the auto-recover option — there's nothing to auto-fix.
+        """
         where = self._sval(entity_of("sensor", self._prefix, "current_room")) or "somewhere"
+        msgs = {
+            "beached": ("🆘 Vacuum needs a hand",
+                        f"It's beached near {where} — climbed onto something and lifted its "
+                        "wheels off the floor, so it can't free itself. Please lift it onto "
+                        "flat floor; it'll carry on once it's back down.",
+                        f"beached near {where} — needs a manual lift"),
+            "stuck": ("⚠️ Vacuum may be stuck",
+                      f"It's stuck near {where} and couldn't free itself (it tried to back out "
+                      "but didn't move). Worth a quick look.",
+                      f"stuck near {where} — needs a check"),
+            "hardware": ("🔧 Vacuum needs a hand",
+                         f"It stopped with a wheel-motor error near {where}. Usually something's "
+                         "tangled around a wheel (hair/thread) or it jammed — please check the "
+                         "wheels; it'll carry on once it's clear.",
+                         f"wheel-motor error near {where} — check the wheels"),
+        }
+        title, body, status_reason = msgs.get(cause, msgs["beached"])
         if run.get("notified_beached"):
-            self._set_status("error", f"beached near {where} — waiting to be lifted")
+            self._set_status("error", status_reason)
             return True
         run["notified_beached"] = True
         run["errored"] = True
+        self._help_pending = True   # so we can send an "all clear" once it's home
         pos = self._vacuum_position()
         await self.tracker.async_set_active_run(run)
         await self.tracker.async_log_stuck({
@@ -682,20 +744,89 @@ class SchedulerEngine:
             "kind": run.get("kind"),
             "attempt": 0,
             "run_id": run.get("started"),
-            "beached": True,
+            "beached": (cause == "beached"),
         })
         if bool(self._opt(OPT_NOTIFY_STUCK, DEFAULT_NOTIFY_STUCK)):
+            await self._notify(title, body, high_priority=True, actions=self._rescue_actions())
+        self._set_status("error", status_reason)
+        _LOGGER.info("needs-hand (%s) near %s at %s", cause, where, pos)
+        return True
+
+    async def _maybe_all_clear(self, now: datetime) -> None:
+        """After a 'needs help' alert, tell the user ONCE when the robot has
+        sorted itself out and is back on the dock — so a self-recovered rescue
+        doesn't leave them thinking it still needs help (live 2026-08-03: a
+        wheel-motor alert fired, the robot freed itself and docked, and nothing
+        ever said 'all clear')."""
+        if not self._help_pending or self._error_active():
+            return
+        if not self._at_dock():
+            return                      # hasn't made it home yet
+        self._help_pending = False
+        if bool(self._opt(OPT_NOTIFY_STUCK, DEFAULT_NOTIFY_STUCK)):
             await self._notify(
-                "🆘 Vacuum needs a hand",
-                f"It's beached near {where} — climbed onto something and lifted its "
-                "wheels off the floor, so it can't free itself. Please lift it onto "
-                "flat floor; it'll carry on once it's back down.",
+                "✅ Vacuum all clear",
+                "It sorted itself out and is back on the dock — no action needed.",
+            )
+        _LOGGER.info("all-clear: robot recovered and docked after a help alert")
+
+    async def _watch_no_progress(self, now: datetime) -> None:
+        """Catch a robot that's MOVING but getting nowhere — circling, repositioning
+        in place, or Blocked while trying to return — and ask for a hand. The
+        movement-based watchdogs miss this because any twitch re-arms their 'did it
+        move' check, so here we track PRODUCTIVE progress instead. Runs every tick,
+        for scheduler AND manual/native runs. Deduped against the other rescue
+        alerts via _help_pending, and longer-fused so it's a clean backstop.
+
+        Productive = ANY of: the robot's task-progress % climbed, its cleaned m²
+        climbed, or it netted STUCK_MIN_ESCAPE_MM closer to the dock since the last
+        productive moment. Progress% is the key signal while cleaning (fine-grained,
+        so slow-but-real cleaning doesn't false-trip); the distance term is anchored
+        fresh at each productive moment (not at the dock, where the run starts) so a
+        genuine return home reads as productive while a stuck return still fires."""
+        pos = self._vacuum_position()
+        if pos is None:
+            return
+        if self._at_dock(pos):
+            self._progress_ref = None          # home -> reset
+            return
+        dock = self._charger_position()
+        dist = (math.hypot(pos[0] - dock[0], pos[1] - dock[1])
+                if dock is not None else None)
+        area = self._cleaned_area()
+        prog = self._clean_progress()
+        ref, productive = evaluate_progress(
+            self._progress_ref, now.isoformat(), prog, area, dist, STUCK_MIN_ESCAPE_MM)
+        self._progress_ref = ref
+        if productive:
+            return
+        # Another rescue alert already covers this episode? Don't double-notify.
+        if self._help_pending or ref.get("notified"):
+            return
+        since = _parse_iso(ref.get("since"))
+        stalled = (now - since).total_seconds() if since else 0
+        if stalled < NO_PROGRESS_SECONDS:
+            return
+        ref["notified"] = True
+        self._help_pending = True
+        where = self._sval(entity_of("sensor", self._prefix, "current_room")) or "somewhere"
+        err = self._sval(entity_of("sensor", self._prefix, SUF_ERROR)) or "no error"
+        await self.tracker.async_log_stuck({
+            "ts": now.isoformat(), "room": where, "x": pos[0], "y": pos[1],
+            "error": f"no_progress ({err})", "kind": "any", "attempt": 0,
+            "run_id": None, "beached": False,
+        })
+        if bool(self._opt(OPT_NOTIFY_STUCK, DEFAULT_NOTIFY_STUCK)):
+            mins = int(stalled // 60)
+            await self._notify(
+                "🛟 Vacuum can't get home",
+                f"It's been near {where} for {mins} min moving about but not getting any "
+                "closer to the dock — it may be circling, repositioning, or nudged up "
+                "against something. Worth a look; it probably needs a hand.",
                 high_priority=True,
                 actions=self._rescue_actions(),
             )
-        self._set_status("error", f"beached near {where} — needs a manual lift")
-        _LOGGER.info("beached (unrecoverable) near %s at %s", where, pos)
-        return True
+        _LOGGER.info("no-progress: %ss near %s (dist=%s, err=%s)", int(stalled), where, dist, err)
 
     async def _handle_blocked(self, run: dict, now: datetime) -> bool:
         """Something is in its way. Do the SMALLEST thing that works: resume.
@@ -760,6 +891,10 @@ class SchedulerEngine:
         # robot needs a hand no matter the option — reverse-out can't help it.
         if self._beached_error():
             return await self._handle_beached(run, now)
+        # A wheel-motor / hardware fault can't be reversed out of — a nudge won't
+        # help and would mis-read as "beached". Ask for a physical check instead.
+        if self._hardware_error():
+            return await self._handle_beached(run, now, cause="hardware")
         # Merely obstructed? Just resume — the least intervention that works.
         if self._blocked_error():
             return await self._handle_blocked(run, now)
@@ -867,7 +1002,9 @@ class SchedulerEngine:
         if run["stuck_no_move"] >= STUCK_NO_MOVE_LIMIT:
             run["recovering"] = False
             await self._restore_voice(run)   # our maneuver's over; give it its voice back
-            await self._handle_beached(run, now)
+            # Reverse-out achieved nothing, but the error wasn't a drop sensor —
+            # it's wedged, not lifted. Say "stuck", not "beached/wheels off floor".
+            await self._handle_beached(run, now, cause="stuck")
             return True
         if bool(self._opt(OPT_NOTIFY_STUCK, DEFAULT_NOTIFY_STUCK)):
             await self._notify(
@@ -958,6 +1095,7 @@ class SchedulerEngine:
         if stalled < STRANDED_SECONDS:
             return
         self._stranded_notified = True
+        self._help_pending = True   # tell them "all clear" if it makes it home
         where = self._sval(entity_of("sensor", self._prefix, "current_room")) or "somewhere"
         err = self._sval(entity_of("sensor", self._prefix, SUF_ERROR)) or "no error"
         await self.tracker.async_log_stuck({
@@ -1011,6 +1149,7 @@ class SchedulerEngine:
         if stalled < SILENT_STUCK_SECONDS:
             return
         run["silent_stuck_notified"] = True
+        self._help_pending = True   # so the "all clear" fires when it's home again
         await self.tracker.async_set_active_run(run)
         where = self._sval(entity_of("sensor", self._prefix, "current_room")) or "somewhere"
         await self.tracker.async_log_stuck({
@@ -1042,6 +1181,27 @@ class SchedulerEngine:
         raw = self._sval(entity_of("sensor", self._prefix, "battery_level"))
         try:
             return float(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _cleaned_area(self) -> float | None:
+        """m² cleaned so far in the current task (the robot's own live counter),
+        or None if unavailable. Used as the 'is it being productive' signal."""
+        st = self.hass.states.get(self._vacuum_entity)
+        val = st.attributes.get("cleaned_area") if st else None
+        try:
+            return float(val) if val is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _clean_progress(self) -> float | None:
+        """The robot's own 0-100 task-progress %, or None if unavailable. Finer
+        grained than cleaned_area (which is integer m²), so slow-but-real cleaning
+        still reads as productive and doesn't trip the no-progress watchdog."""
+        st = self.hass.states.get(self._vacuum_entity)
+        val = st.attributes.get("cleaning_progress") if st else None
+        try:
+            return float(val) if val is not None else None
         except (TypeError, ValueError):
             return None
 
@@ -1215,6 +1375,21 @@ class SchedulerEngine:
 
         # 2) Presence grace bookkeeping.
         away_ok = await self._update_presence(now)
+
+        # 2b) Recovered and docked after a "needs help" alert? Send the all-clear
+        # (runs every tick, whether or not a run is in flight).
+        try:
+            await self._maybe_all_clear(now)
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning("all-clear check failed: %s", exc)
+
+        # 2c) Moving but getting nowhere (circling / repositioning / Blocked while
+        # returning)? Ask for a hand — catches what the movement watchdogs miss,
+        # for manual/native runs too. Runs every tick, before the active-run branch.
+        try:
+            await self._watch_no_progress(now)
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning("no-progress watch failed: %s", exc)
 
         # 3) A run is in flight → verify/await it; never dispatch concurrently.
         if self.tracker.active_run is not None:
@@ -1534,13 +1709,21 @@ class SchedulerEngine:
         })
 
         default_suction = self._opt(OPT_DEFAULT_SUCTION, "")
-        deep = bool(self._opt(OPT_VACUUM_BEFORE_MOP, DEFAULT_VACUUM_BEFORE_MOP)) and not quiet
+        # "Vacuum before mop" mops the whole house via the global sequential mode,
+        # which DISCARDS the robot's native per-room modes. Skip it when we're
+        # honoring native settings (the default) so a room you set to sweep-only
+        # in the Dreame app is not force-mopped. Live 2026-08-03: wet pads dragged
+        # onto the Main Room carpet and stalled the right wheel, because this
+        # override mopped a room natively set to sweep.
+        honor_native = bool(self._opt(OPT_HONOR_NATIVE, DEFAULT_HONOR_NATIVE))
+        deep = (bool(self._opt(OPT_VACUUM_BEFORE_MOP, DEFAULT_VACUUM_BEFORE_MOP))
+                and not quiet and not honor_native)
 
         if deep:
             # Vacuum-before-mop: sweep the whole area, THEN mop it (no smearing).
             # Uses the GLOBAL sequential mode, so per-room modes/suction don't
             # apply this run — the robot does one sweep-then-mop pass over all
-            # target rooms.
+            # target rooms. (Only reached when honor-native is OFF.)
             seq = self._pick_seq_mode()
             await self._svc("switch", "turn_off",
                             {"entity_id": entity_of("switch", self._prefix, SUF_CUSTOMIZED)})

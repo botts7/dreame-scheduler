@@ -3,6 +3,38 @@
 All notable changes to the Dreame Scheduler integration and its companion
 add-on are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.2.1] — 2026-08-04
+
+Honors the robot's own per-room settings, and clearer, self-resolving stuck alerts.
+
+### Integration (`custom_components/dreame_scheduler`)
+- **Honor native per-room settings (new default).** The scheduler now respects
+  the mode / mop / suction you set per room in the Dreame app — a room you set to
+  sweep-only stays sweep-only. **"Vacuum before mop"** (which force-mopped the
+  whole house and discarded per-room modes) is skipped while this is on. Fixes wet
+  mop pads being dragged onto a carpet the robot was natively set to *sweep*,
+  which stalled the wheel motor. Turn honor-native off to restore vacuum-before-mop.
+- **Wheel-motor / hardware faults** are no longer treated as a reversible wedge —
+  a `*_wheel_motor` error now asks you to check the wheels (something tangled / a
+  jam) instead of a futile reverse-out that then mis-reads as "beached".
+- **Honest stuck wording.** "Beached — lift it onto flat floor" is only used when
+  the drop sensor actually fired; otherwise it's "stuck — needs a check" (no more
+  false "wheels off the floor").
+- **"All clear" follow-up.** After a "needs help" alert, once the robot sorts
+  itself out and gets back to the dock you get a "✅ all clear — no action needed",
+  so a self-recovered rescue doesn't leave you worrying.
+- **"Can't get home" watchdog (detect & adapt).** Catches a robot that's moving
+  but getting nowhere — circling, repositioning in place, or Blocked while trying
+  to return. Instead of only asking "did it move?" (which tiny nudges keep
+  re-arming), it tracks real progress — the robot's own task-progress %, cleaned
+  m², or netting closer to the dock — and if none improve for 8 minutes it flags
+  "🛟 can't get home, needs a hand". Using progress % (not just whole m²) means a
+  slow-but-real clean is never mistaken for a stall. Works for manual/native runs
+  too, and clears itself with the "✅ all clear" once it docks.
+
+### Add-on
+- New **"Honor native per-room settings"** toggle (General), on by default.
+
 ## [0.2.0] — 2026-07-27
 
 A big feature + reliability release: the scheduler now heals itself when the
