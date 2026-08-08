@@ -3,6 +3,20 @@
 All notable changes to the Dreame Scheduler integration and its companion
 add-on are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.2.2] — 2026-08-08
+
+Fixes a return-to-dock loop during mop-pad washing.
+
+### Integration (`custom_components/dreame_scheduler`)
+- **No more return_to_base loop while the dock washes the mop pads.** When a run
+  was paused because someone was home, the "keep it docked" enforcement treated
+  *any* `cleaning` state as the robot having escaped — but a mop-pad wash/dry
+  cycle also reports `cleaning` while the robot sits on the dock. The scheduler
+  would then fire `return_to_base` on every wash-cycle blip, looping for the
+  whole wash. It now distinguishes a genuine escape from station servicing
+  (docked / washing / drying), so a wash cycle is left alone. The return-on-
+  arrival step is likewise skipped when the robot is already home/servicing.
+
 ## [0.2.1] — 2026-08-04
 
 Honors the robot's own per-room settings, and clearer, self-resolving stuck alerts.

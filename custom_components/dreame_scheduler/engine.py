@@ -1042,6 +1042,26 @@ class SchedulerEngine:
         # No coordinates to measure with — fall back to the robot's own claim.
         return (self._vacuum_state() or "") == "docked"
 
+    def _home_or_servicing(self) -> bool:
+        """True when the robot is on the dock or busy AT the station — washing or
+        drying its mop pads. A wash/dry cycle reports vacuum_state 'cleaning' even
+        though the robot never left the dock, so treat it as 'home'. Without this,
+        the dock-enforcement branches read that wash-cycle 'cleaning' as an escape
+        and fire return_to_base on every blip, looping for the whole wash (live
+        2026-08-08: a ~3-min return_to_base loop that only stopped when the wash
+        finished)."""
+        st = self.hass.states.get(self._vacuum_entity)
+        if st is None:
+            return False
+        a = st.attributes
+        return bool(a.get("docked") or a.get("washing") or a.get("drying"))
+
+    def _escaped_cleaning(self) -> bool:
+        """The robot is genuinely out on the floor cleaning — not sitting on the
+        dock reporting 'cleaning' because it's washing/drying its pads. This is the
+        real 'it escaped while someone's home' test the dock-enforcement uses."""
+        return (self._vacuum_state() or "") == "cleaning" and not self._home_or_servicing()
+
     def _manual_intent_stale(self, run: dict, now: datetime) -> bool:
         """Has a manual "clean now" outlived the intent behind it?
 
@@ -1823,8 +1843,10 @@ class SchedulerEngine:
                 # paused segment task on its own, so keep ENFORCING the dock
                 # rather than passively waiting — otherwise it escapes and cleans
                 # while they're home, and can get stuck with no alert (exactly
-                # what happened live 2026-07-08).
-                if (self._vacuum_state() or "") == "cleaning":
+                # what happened live 2026-07-08). But only if it has GENUINELY
+                # escaped the dock — a mop-pad wash cycle also reads as 'cleaning'
+                # and would loop return_to_base for the whole wash (live 2026-08-08).
+                if self._escaped_cleaning():
                     await self._svc("vacuum", "return_to_base", {"entity_id": self._vacuum_entity})
                     self._set_status("returning", "someone home — sending back to the dock")
                 else:
@@ -1894,7 +1916,7 @@ class SchedulerEngine:
         # Keep enforcing the dock while someone is home, mirroring the
         # suspended-branch enforcement; without this the presence check below
         # (which skips interrupting runs) never sends it back.
-        if (run.get("interrupting") and vstate == "cleaning"
+        if (run.get("interrupting") and self._escaped_cleaning()
                 and self._presence_home() is True):
             await self._svc("vacuum", "return_to_base", {"entity_id": self._vacuum_entity})
             self._set_status("returning", "someone home — sending back to the dock")
@@ -1907,6 +1929,7 @@ class SchedulerEngine:
         if ((run.get("kind") != "manual" or self._manual_intent_stale(run, now))
                 and not run.get("door_retry_home")
                 and not run.get("interrupting")
+                and not self._home_or_servicing()   # already docked/washing — nothing to send home
                 and bool(self._opt(OPT_RETURN_ON_ARRIVAL, DEFAULT_RETURN_ON_ARRIVAL))
                 and bool(self._opt(OPT_REQUIRE_AWAY, DEFAULT_REQUIRE_AWAY))
                 and self._presence_home() is True):
