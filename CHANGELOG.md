@@ -3,6 +3,24 @@
 All notable changes to the Dreame Scheduler integration and its companion
 add-on are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.2.3] — 2026-08-09
+
+Smarter handling when the robot gets tangled in a cable or cord.
+
+### Integration (`custom_components/dreame_scheduler`)
+- **Tangle-aware recovery.** A cable / cord / cloth tangle (the robot reports it
+  as a `suffocate`) used to run the full reverse-out recovery — up to three
+  reverses. But you can't reverse out of a wrap: backing up just **drags the
+  tangle around**, and because dragging registers as "movement" the
+  reverse-moved-nothing check never caught it. Now a tangle gets **one** gentle
+  reverse (in case it's a loose cord it can back off), a short grace period, and
+  then a clear **"🪢 Vacuum is tangled — please free it by hand"** alert instead
+  of grinding. Fixes a run where the robot wrapped itself in bedroom cables and
+  had to be carried back to the dock.
+- Fixed a stale recovery notification that said it had "walled off the spot" —
+  the scheduler no longer walls off during recovery, so it now says it's backing
+  out and letting the robot re-plan.
+
 ## [0.2.2] — 2026-08-08
 
 Fixes a return-to-dock loop during mop-pad washing.

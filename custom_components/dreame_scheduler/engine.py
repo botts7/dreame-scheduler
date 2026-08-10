@@ -230,6 +230,15 @@ _BEACH_ERROR_WORDS = (
 # 'right_wheel_motor' on a rug with wet mop pads). Reversing achieves nothing and
 # then mis-reads as "beached", so catch these first and ask for a physical check.
 _HARDWARE_ERROR_WORDS = ("wheel_motor",)
+# A cable / cord / cloth TANGLE (the robot reports it as a 'suffocate' — it can't
+# advance). One gentle reverse is worth a try in case it's a loose cord it can
+# back off, but repeating it just DRAGS the tangle around — and dragging counts
+# as 'movement', so the reverse-moved-nothing escalation never catches it. So we
+# cap tangles at a single reverse, then ask for a hand (live 2026-08-09: wrapped
+# in bedroom cables; three reverses only dragged it and the user had to carry it
+# back). These are a subset of the recoverable words, escalated sooner.
+_TANGLE_ERROR_WORDS = ("suffocate", "tangle", "wrap")
+TANGLE_MAX_REVERSE = 1             # reverse attempts on a tangle before asking for help
 REVERSE_OUT_STEPS = 3              # remote-control reverse nudges to back off a trap
 REVERSE_OUT_VELOCITY = -110       # straight reverse (negative), retracing the entry route
 MAX_RECOVER_ATTEMPTS = 3            # per run, before giving up and docking
@@ -487,6 +496,16 @@ class SchedulerEngine:
         err = (self._sval(entity_of("sensor", self._prefix, SUF_ERROR)) or "").lower()
         return bool(err) and any(w in err for w in _HARDWARE_ERROR_WORDS)
 
+    def _tangle_error(self) -> bool:
+        """True if the vacuum is in error AND the text reads as a cable/cord/cloth
+        tangle (a 'suffocate'). Still recoverable enough for ONE gentle reverse,
+        but escalated to a hand-needed alert sooner than a normal trap — repeated
+        reversing just drags the tangle around (see _TANGLE_ERROR_WORDS)."""
+        if not self._error_active():
+            return False
+        err = (self._sval(entity_of("sensor", self._prefix, SUF_ERROR)) or "").lower()
+        return bool(err) and any(w in err for w in _TANGLE_ERROR_WORDS)
+
     # -------- map reads / zone writes (for auto-recovery no-go placement) -----
     def _map_attr(self, key: str):
         st = self.hass.states.get(entity_of("camera", self._prefix, "map"))
@@ -706,6 +725,8 @@ class SchedulerEngine:
                          claim "wheels off the floor" (that wording over-stated it).
           * "hardware" — a wheel-motor/hardware fault: something tangled in a wheel
                          or a motor overload; ask for a physical check.
+          * "tangle"   — wrapped in a cable/cord/cloth: one reverse didn't free it,
+                         and reversing more just drags it; ask to free it by hand.
 
         Runs regardless of the auto-recover option — there's nothing to auto-fix.
         """
@@ -725,6 +746,11 @@ class SchedulerEngine:
                          "tangled around a wheel (hair/thread) or it jammed — please check the "
                          "wheels; it'll carry on once it's clear.",
                          f"wheel-motor error near {where} — check the wheels"),
+            "tangle": ("🪢 Vacuum is tangled",
+                       f"It's caught on something near {where} — most likely a cable, cord or "
+                       "cloth wrapped around a brush or wheel. It can't reverse out of this one, "
+                       "so please free it and pop it back on the dock; it'll carry on from there.",
+                       f"tangled near {where} — please free it by hand"),
         }
         title, body, status_reason = msgs.get(cause, msgs["beached"])
         if run.get("notified_beached"):
@@ -940,6 +966,19 @@ class SchedulerEngine:
 
         if not self._recoverable_error():
             return False
+        # Cable/cord/cloth tangle: we gave it ONE gentle reverse already (in case
+        # it could back off a loose cord). It's still erroring, so stop — a second
+        # reverse just drags the tangle tighter (and dragging registers as
+        # 'movement', so the reverse-moved-nothing check never fires). Ask for a
+        # hand instead (live 2026-08-09: bedroom cables, three reverses only
+        # dragged it and the user had to carry it back to the dock).
+        if self._tangle_error() and int(run.get("recover_count", 0)) >= TANGLE_MAX_REVERSE:
+            if not run.get("notified_beached"):
+                run["recovering"] = False
+                await self._restore_voice(run)   # end our maneuver, give its voice back
+                await self.tracker.async_set_active_run(run)
+                await self._handle_beached(run, now, cause="tangle")
+            return True
         if int(run.get("recover_count", 0)) >= MAX_RECOVER_ATTEMPTS:
             # Give up — but at least try to bring it home once before falling
             # through to the error notify (nothing else ever docks it).
@@ -1009,7 +1048,7 @@ class SchedulerEngine:
         if bool(self._opt(OPT_NOTIFY_STUCK, DEFAULT_NOTIFY_STUCK)):
             await self._notify(
                 "🛟 Vacuum recovering",
-                f"Got stuck near {where} — walled off the spot and freeing it to carry on.",
+                f"Got stuck near {where} — backing it out and letting it re-plan to carry on.",
                 high_priority=True,
                 actions=self._rescue_actions(),
             )
