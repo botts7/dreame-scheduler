@@ -60,6 +60,7 @@ def _empty_state() -> dict:
         "manual_clean": {},       # rooms the robot can't reach -> {seg: {name, reason, added}}
         "mop_counters": {},       # per-room mop cadence -> {seg: {count:int, date:"YYYY-MM-DD"}}
         "door_deferred": {},      # rooms skipped today for a shut door -> {seg: {date, retries}}
+        "consumable_alerted": {}, # wear-parts we've flagged as low -> {key: True}, cleared on reset
     }
 
 
@@ -302,4 +303,15 @@ class WeekTracker:
     async def async_clear_door_deferred(self, seg) -> None:
         if str(seg) in self.door_deferred:
             self.door_deferred.pop(str(seg), None)
+            await self.async_save()
+
+    @property
+    def consumable_alerted(self) -> dict:
+        return self._state.setdefault("consumable_alerted", {})
+
+    async def async_set_consumable_alerted(self, flags: dict) -> None:
+        """Persist which wear-parts have been flagged as low (so we alert once).
+        Only writes when the set actually changed, to avoid needless saves."""
+        if flags != self.consumable_alerted:
+            self._state["consumable_alerted"] = dict(flags)
             await self.async_save()

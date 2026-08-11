@@ -59,6 +59,8 @@ from .const import (
     DEFAULT_NOTIFY_SKIPPED,
     DEFAULT_NOTIFY_STUCK,
     DEFAULT_NOTIFY_WEEKLY,
+    DEFAULT_CONSUMABLE_ALERT,
+    DEFAULT_CONSUMABLE_THRESHOLD,
     DEFAULT_REPEATS,
     DEFAULT_RESUME_WHEN_AWAY,
     DEFAULT_RETURN_ON_ARRIVAL,
@@ -90,6 +92,8 @@ from .const import (
     OPT_MANUAL_CLEAN_STALE_DAYS,
     OPT_NOTIFY_TARGETS,
     OPT_NOTIFY_WEEKLY,
+    OPT_CONSUMABLE_ALERT,
+    OPT_CONSUMABLE_THRESHOLD,
     OPT_SHOW_UNREACHABLE,
     OPT_DOOR_RETRY_ENABLED,
     OPT_DOOR_RETRY_MIN,
@@ -141,6 +145,7 @@ from .const import (
     e as entity_of,
     room_entity,
 )
+from .consumables import CONSUMABLE_BY_KEY, CONSUMABLES, evaluate_consumables
 from .scheduler import (
     advance_mop_cadence,
     all_enabled_segments,
@@ -229,7 +234,13 @@ _BEACH_ERROR_WORDS = (
 # something's tangled/jammed in a wheel or the motor overloaded (live 2026-08-03:
 # 'right_wheel_motor' on a rug with wet mop pads). Reversing achieves nothing and
 # then mis-reads as "beached", so catch these first and ask for a physical check.
-_HARDWARE_ERROR_WORDS = ("wheel_motor",)
+# A wheel-motor fault OR a wheel-speed fault (the drive wheel isn't turning at
+# the commanded speed — slipping, jammed, or something wound round the axle). No
+# manoeuvre clears either; both need a physical check. Both spellings of the
+# speed fault seen in the wild are matched ('wheel_speed' and the robot's own
+# 'wheell_speed', live 2026-08-11: recurring right-wheel faults). A plain 'wheel'
+# stays in the recoverable list — only these specific faults are hardware.
+_HARDWARE_ERROR_WORDS = ("wheel_motor", "wheel_speed", "wheell_speed")
 # A cable / cord / cloth TANGLE (the robot reports it as a 'suffocate' — it can't
 # advance). One gentle reverse is worth a try in case it's a loose cord it can
 # back off, but repeating it just DRAGS the tangle around — and dragging counts
@@ -284,6 +295,7 @@ DOCK_RADIUS_MM = 600               # within this of the charger counts as "home"
 # Live 2026-08-08: after a reposition it inched around a no-go for many minutes,
 # then wedged, with no alert. Longer than the others so it's a clean backstop.
 NO_PROGRESS_SECONDS = 480
+CONSUMABLE_CHECK_INTERVAL = 1800   # seconds between wear-part life checks (they change slowly)
 # How recent a beaching must be for the "tidy the floor" reminder to keep firing.
 TIDY_RECENCY_DAYS = 2
 # How long the "show me where I'm stuck" robot waits at the spot (light on) so
@@ -333,6 +345,8 @@ class SchedulerEngine:
         # repositioning in place, Blocked while returning) — which the movement-based
         # watchdogs miss because a twitch re-arms them. Reset when it docks.
         self._progress_ref: dict | None = None
+        # Throttle for the wear-part life check (they change over hours, not ticks).
+        self._consumables_checked_at: datetime | None = None
         # Serialises evaluations AND manual actions: state-event re-evaluations
         # can land while a tick is still awaiting mid-finalise (double-banking
         # rooms + duplicate history entries, seen live 2026-07-09), and a manual
@@ -505,6 +519,18 @@ class SchedulerEngine:
             return False
         err = (self._sval(entity_of("sensor", self._prefix, SUF_ERROR)) or "").lower()
         return bool(err) and any(w in err for w in _TANGLE_ERROR_WORDS)
+
+    def _error_text(self) -> str | None:
+        """The robot's RAW current error code/text (e.g. 'right_wheel_speed'), or
+        None when there's no genuine fault. Surfaced verbatim in alerts so the
+        ACTUAL error shows — not just a friendly summary — which is what makes a
+        recurring hardware fault (like a right-wheel error) visible to the user."""
+        raw = self._sval(entity_of("sensor", self._prefix, SUF_ERROR))
+        if not raw:
+            return None
+        if str(raw).strip().lower() in ("no error", "no_error", "none", "unknown", "unavailable", ""):
+            return None
+        return str(raw).strip()
 
     # -------- map reads / zone writes (for auto-recovery no-go placement) -----
     def _map_attr(self, key: str):
@@ -753,6 +779,13 @@ class SchedulerEngine:
                        f"tangled near {where} — please free it by hand"),
         }
         title, body, status_reason = msgs.get(cause, msgs["beached"])
+        # Surface the ACTUAL robot error code, not just the friendly summary — a
+        # recurring hardware fault (e.g. a right-wheel error) is only visible if
+        # the raw code is in the alert the user actually reads.
+        raw = self._error_text()
+        if raw:
+            body = f"{body}\n\nReported error: {raw}"
+            status_reason = f"{status_reason} [{raw}]"
         if run.get("notified_beached"):
             self._set_status("error", status_reason)
             return True
@@ -853,6 +886,40 @@ class SchedulerEngine:
                 actions=self._rescue_actions(),
             )
         _LOGGER.info("no-progress: %ss near %s (dist=%s, err=%s)", int(stalled), where, dist, err)
+
+    async def _check_consumables(self, now: datetime) -> None:
+        """Warn once when a wear-part (filter, brush, mop pad, sensors, detergent,
+        silver-ion) drops to/below the configured remaining-life %, with buttons to
+        reset its counter (once replaced) or dismiss. Throttled — these change over
+        hours, not ticks — and deduped via a persisted per-part flag that clears
+        itself once the part is replaced (its life climbs back above threshold)."""
+        if not bool(self._opt(OPT_CONSUMABLE_ALERT, DEFAULT_CONSUMABLE_ALERT)):
+            return
+        last = self._consumables_checked_at
+        if last is not None and (now - last).total_seconds() < CONSUMABLE_CHECK_INTERVAL:
+            return
+        threshold = int(self._opt(OPT_CONSUMABLE_THRESHOLD, DEFAULT_CONSUMABLE_THRESHOLD))
+        readings = self._consumable_readings()
+        if all(v is None for v in readings.values()):
+            return   # robot not reporting yet (e.g. mid cloud-reconnect) — retry next
+                     # tick; do NOT arm the throttle, or the first alert is delayed.
+        self._consumables_checked_at = now
+        alerted = dict(self.tracker.consumable_alerted)
+        due, new_alerted = evaluate_consumables(readings, threshold, alerted)
+        if new_alerted != alerted:
+            await self.tracker.async_set_consumable_alerted(new_alerted)
+        for c in due:
+            pct = readings.get(c["key"])
+            await self._notify(
+                f"{c['emoji']} {c['name']} running low",
+                f"The {c['name'].lower()} is at {pct}% of its life. Replace it soon; "
+                "once you have, tap “Reset counter” so the robot starts a fresh count.",
+                actions=[
+                    {"action": self._action_id(f"RESETCONS_{c['key']}"), "title": "Reset counter"},
+                    {"action": self._action_id(f"DISMISSCONS_{c['key']}"), "title": "Dismiss"},
+                ],
+            )
+            _LOGGER.info("consumable low: %s at %s%% (<= %s%%)", c["key"], pct, threshold)
 
     async def _handle_blocked(self, run: dict, now: datetime) -> bool:
         """Something is in its way. Do the SMALLEST thing that works: resume.
@@ -1046,14 +1113,18 @@ class SchedulerEngine:
             await self._handle_beached(run, now, cause="stuck")
             return True
         if bool(self._opt(OPT_NOTIFY_STUCK, DEFAULT_NOTIFY_STUCK)):
+            raw = self._error_text()
+            body = f"Got stuck near {where} — backing it out and letting it re-plan to carry on."
+            if raw:
+                body += f"\n\nReported error: {raw}"
             await self._notify(
                 "🛟 Vacuum recovering",
-                f"Got stuck near {where} — backing it out and letting it re-plan to carry on.",
+                body,
                 high_priority=True,
                 actions=self._rescue_actions(),
             )
-        _LOGGER.info("auto-recover: attempt %s near %s at %s (moved %s mm)",
-                     run["recover_count"], where, pos, moved)
+        _LOGGER.info("auto-recover: attempt %s near %s at %s (moved %s mm, error %s)",
+                     run["recover_count"], where, pos, moved, self._error_text())
         return True
 
     def _charger_position(self) -> tuple[int, int] | None:
@@ -1264,6 +1335,21 @@ class SchedulerEngine:
         except (TypeError, ValueError):
             return None
 
+    def _consumable_readings(self) -> dict:
+        """{consumable key: remaining-life % (int) or None} from the robot's own
+        attributes. None where the sensor is missing/unavailable, so a part is
+        never falsely flagged as worn out on a transient read."""
+        st = self.hass.states.get(self._vacuum_entity)
+        attrs = st.attributes if st else {}
+        out: dict = {}
+        for c in CONSUMABLES:
+            raw = attrs.get(c["life_attr"])
+            try:
+                out[c["key"]] = int(float(raw)) if raw is not None else None
+            except (TypeError, ValueError):
+                out[c["key"]] = None
+        return out
+
     def _presence_home(self) -> bool | None:
         """True if anyone home, False if all away, None if undeterminable."""
         ents = self._presence_entities()
@@ -1449,6 +1535,13 @@ class SchedulerEngine:
             await self._watch_no_progress(now)
         except Exception as exc:  # noqa: BLE001
             _LOGGER.warning("no-progress watch failed: %s", exc)
+
+        # 2d) Wear-part life check (filter/brush/mop/sensors/detergent) — throttled
+        # internally, alerts once per part with reset/dismiss buttons.
+        try:
+            await self._check_consumables(now)
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning("consumable check failed: %s", exc)
 
         # 3) A run is in flight → verify/await it; never dispatch concurrently.
         if self.tracker.active_run is not None:
@@ -1934,20 +2027,25 @@ class SchedulerEngine:
         # send it home and finalise as interrupted, so it can't clean the house
         # unbidden. Mark interrupting once so we don't fight it every tick.
         if self._robot_overreaching(run) and not run.get("interrupting"):
-            _LOGGER.warning("robot overreaching: cleaning %s, dispatched %s — reining in",
-                            self._robot_active_segments(), run.get("segments"))
+            stray = sorted(self._robot_active_segments()
+                           - {int(s) for s in run.get("segments", []) if str(s).isdigit()})
+            stray_names = ", ".join(self._room_name(str(s)) for s in stray) or "another room"
+            raw = self._error_text()
+            _LOGGER.warning("robot overreaching: cleaning %s, dispatched %s (stray=%s, error=%s) — reining in",
+                            self._robot_active_segments(), run.get("segments"), stray_names, raw)
             run["interrupting"] = True
             run["errored"] = True
             await self.tracker.async_set_active_run(run)
             await self._svc("vacuum", "return_to_base", {"entity_id": self._vacuum_entity})
-            self._set_status("returning", "reining it in — it started cleaning rooms it wasn't asked to")
+            self._set_status("returning",
+                             f"reining it in — it strayed into {stray_names}"
+                             + (f" [{raw}]" if raw else ""))
             if bool(self._opt(OPT_NOTIFY_STUCK, DEFAULT_NOTIFY_STUCK)):
-                await self._notify(
-                    "⚠️ Vacuum overreached",
-                    "It started cleaning rooms it wasn't asked to (a firmware hiccup) — "
-                    "sent it back to the dock.",
-                    high_priority=True,
-                )
+                body = (f"Its firmware resumed a stale task and it started cleaning "
+                        f"{stray_names} — not on today's list. Sent it back to the dock.")
+                if raw:
+                    body += f"\n\nReported error: {raw}"
+                await self._notify("⚠️ Vacuum overreached", body, high_priority=True)
             return
 
         # An 'interrupting' run was already sent home — but the firmware can
@@ -2854,7 +2952,23 @@ class SchedulerEngine:
             "dust_bag": self._sval(entity_of("sensor", p, SUF_DUST_BAG)),
             "clean_water": self._sval(entity_of("sensor", p, SUF_CLEAN_WATER)),
             "dirty_water": self._sval(entity_of("sensor", p, SUF_DIRTY_WATER)),
+            "consumables": self._consumables_snapshot(),
         }
+
+    def _consumables_snapshot(self) -> list[dict]:
+        """Wear-part life for the card / Report tab: name, %, and whether it's at
+        or below the alert threshold — sorted lowest-first so the neediest shows."""
+        threshold = int(self._opt(OPT_CONSUMABLE_THRESHOLD, DEFAULT_CONSUMABLE_THRESHOLD))
+        readings = self._consumable_readings()
+        out = []
+        for c in CONSUMABLES:
+            pct = readings.get(c["key"])
+            if pct is None:
+                continue
+            out.append({"key": c["key"], "name": c["name"], "emoji": c["emoji"],
+                        "percent": pct, "low": pct <= threshold})
+        out.sort(key=lambda x: x["percent"])
+        return out
 
     def status_snapshot(self) -> dict:
         """Rich status for the sensor entities (built fresh each read)."""
@@ -2924,6 +3038,32 @@ class SchedulerEngine:
             self.hass.async_create_task(self._notification_send_home())
         elif action == self._action_id("RESUME"):
             self.hass.async_create_task(self._notification_resume())
+            return
+        for c in CONSUMABLES:
+            if action == self._action_id(f"RESETCONS_{c['key']}"):
+                self.hass.async_create_task(self._notification_reset_consumable(c["key"]))
+                return
+            if action == self._action_id(f"DISMISSCONS_{c['key']}"):
+                # Nothing to do on the robot — the part's already flagged, so it
+                # won't nag again until it's replaced (life climbs back up).
+                _LOGGER.info("notification action: dismissed %s low alert", c["key"])
+                return
+
+    async def _notification_reset_consumable(self, key: str) -> None:
+        """Reset a wear-part's life counter on the robot (the user replaced it),
+        and clear our low flag so it can alert again next time it wears down."""
+        c = CONSUMABLE_BY_KEY.get(key)
+        if not c:
+            return
+        _LOGGER.info("notification action: reset consumable %s", key)
+        await self._svc(
+            "button", "press",
+            {"entity_id": entity_of("button", self._prefix, c["reset"])},
+        )
+        flags = dict(self.tracker.consumable_alerted)
+        if flags.pop(key, None) is not None:
+            await self.tracker.async_set_consumable_alerted(flags)
+        self._consumables_checked_at = None   # re-check promptly to confirm it reset
 
     async def _notification_send_home(self) -> None:
         _LOGGER.info("notification action: send home")

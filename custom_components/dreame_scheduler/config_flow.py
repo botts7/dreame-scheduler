@@ -32,6 +32,8 @@ from .const import (
     DEFAULT_NOTIFY_SKIPPED,
     DEFAULT_NOTIFY_STUCK,
     DEFAULT_NOTIFY_WEEKLY,
+    DEFAULT_CONSUMABLE_ALERT,
+    DEFAULT_CONSUMABLE_THRESHOLD,
     DEFAULT_REQUIRE_AWAY,
     DEFAULT_RESUME_WHEN_AWAY,
     DEFAULT_RETURN_ON_ARRIVAL,
@@ -61,6 +63,8 @@ from .const import (
     OPT_NOTIFY_STUCK,
     OPT_NOTIFY_TARGETS,
     OPT_NOTIFY_WEEKLY,
+    OPT_CONSUMABLE_ALERT,
+    OPT_CONSUMABLE_THRESHOLD,
     OPT_PRESENCE_ENTITIES,
     OPT_QUIET_SUCTION,
     OPT_REQUIRE_AWAY,
@@ -226,6 +230,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             # NumberSelector returns floats; normalise to int.
             user_input[OPT_AWAY_GRACE_MIN] = int(user_input.get(OPT_AWAY_GRACE_MIN, DEFAULT_AWAY_GRACE_MIN))
             user_input[OPT_DOOR_RETRY_MIN] = int(user_input.get(OPT_DOOR_RETRY_MIN, DEFAULT_DOOR_RETRY_MIN))
+            user_input[OPT_CONSUMABLE_THRESHOLD] = int(user_input.get(OPT_CONSUMABLE_THRESHOLD, DEFAULT_CONSUMABLE_THRESHOLD))
             return self._save(user_input)
 
         try:  # 2025.x preferred API; fall back for older cores
@@ -251,6 +256,9 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             vol.Optional(OPT_NOTIFY_STUCK, default=self._opt(OPT_NOTIFY_STUCK, DEFAULT_NOTIFY_STUCK)): selector.BooleanSelector(),
             vol.Optional(OPT_NOTIFY_SKIPPED, default=self._opt(OPT_NOTIFY_SKIPPED, DEFAULT_NOTIFY_SKIPPED)): selector.BooleanSelector(),
             vol.Optional(OPT_NOTIFY_WEEKLY, default=self._opt(OPT_NOTIFY_WEEKLY, DEFAULT_NOTIFY_WEEKLY)): selector.BooleanSelector(),
+            vol.Optional(OPT_CONSUMABLE_ALERT, default=self._opt(OPT_CONSUMABLE_ALERT, DEFAULT_CONSUMABLE_ALERT)): selector.BooleanSelector(),
+            vol.Optional(OPT_CONSUMABLE_THRESHOLD, default=self._opt(OPT_CONSUMABLE_THRESHOLD, DEFAULT_CONSUMABLE_THRESHOLD)): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=1, max=100, step=1, unit_of_measurement="%", mode=selector.NumberSelectorMode.BOX)),
         })
         return self.async_show_form(step_id="presence", data_schema=schema)
 

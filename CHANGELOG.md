@@ -3,6 +3,35 @@
 All notable changes to the Dreame Scheduler integration and its companion
 add-on are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] — 2026-08-10
+
+Maintenance / consumable alerts.
+
+### Integration (`custom_components/dreame_scheduler`)
+- **Wear-part low alerts.** The scheduler now watches the robot's own remaining-
+  life counters for the filter, main & side brushes, mop pad, dirt sensors,
+  detergent and silver-ion module, and sends a notification the first time any of
+  them drops to/below a threshold (default 10%). The alert carries two buttons:
+  **Reset counter** (once you've replaced the part — presses the robot's own reset
+  so it starts a fresh count) and **Dismiss**. It alerts once per part and won't
+  nag again until the part is replaced (its life climbs back above the threshold).
+  New options: *Alert when a wear-part runs low* (on by default) and the
+  *threshold %*. Current wear-part life is also surfaced on the robot-status
+  attributes for dashboards.
+- **Real error codes in alerts.** Fault alerts (needs-a-hand, recovering,
+  overreach) now include the robot's actual reported error (e.g.
+  `right_wheel_speed`), not just a friendly summary — so a recurring hardware
+  fault is visible instead of hidden behind "a firmware hiccup". The overreach
+  alert also names the room(s) the robot strayed into.
+- **Wheel-speed faults treated as hardware.** A `wheel_speed` / `wheell_speed`
+  error (drive wheel not turning at the commanded speed — slipping/jammed/wound)
+  now asks you to check the wheel instead of a futile reverse-out, matching how
+  `wheel_motor` is already handled.
+
+### Add-on
+- New **"Alert when a wear-part runs low"** toggle and **threshold %** field
+  (Notifications).
+
 ## [0.2.3] — 2026-08-09
 
 Smarter handling when the robot gets tangled in a cable or cord.

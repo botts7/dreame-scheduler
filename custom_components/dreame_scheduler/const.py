@@ -85,6 +85,8 @@ OPT_NOTIFY_TARGETS: Final = "notify_targets"         # list[str] notify service 
 OPT_NOTIFY_STUCK: Final = "notify_stuck"
 OPT_NOTIFY_SKIPPED: Final = "notify_skipped"
 OPT_NOTIFY_WEEKLY: Final = "notify_weekly"
+OPT_CONSUMABLE_ALERT: Final = "consumable_alert"         # bool: warn when a wear-part runs low
+OPT_CONSUMABLE_THRESHOLD: Final = "consumable_threshold"  # int %: alert at/below this remaining life
 
 # Defaults applied to rooms that don't override
 OPT_DEFAULT_MODE: Final = "default_mode"             # cleaning-mode select option string
@@ -160,6 +162,8 @@ DEFAULT_WEEK_START_DAY: Final = 0       # Monday
 DEFAULT_NOTIFY_STUCK: Final = True
 DEFAULT_NOTIFY_SKIPPED: Final = True
 DEFAULT_NOTIFY_WEEKLY: Final = True
+DEFAULT_CONSUMABLE_ALERT: Final = True   # low-noise: fires once when a part is genuinely low
+DEFAULT_CONSUMABLE_THRESHOLD: Final = 10  # percent remaining life
 DEFAULT_VACUUM_BEFORE_MOP: Final = False
 DEFAULT_HONOR_NATIVE: Final = True      # respect the robot's own per-room settings by default
 DEFAULT_ROOM_MOP_EVERY: Final = 1       # per-room mop cadence: 1 = mop on every clean (off)

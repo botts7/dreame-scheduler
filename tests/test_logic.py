@@ -22,6 +22,7 @@ cw = load("clean_window")
 cg = load("clean_guards")
 sc = load("scheduler")
 ha = load("history_analytics")
+co = load("consumables")
 
 fails = []
 
@@ -213,6 +214,26 @@ check("evaluate_progress tiny nudge (<80mm) = not productive", p4 is False)
 # Missing readings (None) never count as progress on their own.
 r5, p5 = sc.evaluate_progress(dict(seed), "t5", prog=None, area=None, dist=None, min_escape_mm=MM)
 check("evaluate_progress all-None = not productive", p5 is False)
+
+# --- evaluate_consumables (maintenance-part alerts) --------------------------
+# Filter low (<=10), rest fine -> only filter is due, and it gets flagged.
+due, na = co.evaluate_consumables(
+    {"filter": 4, "main_brush": 52, "side_brush": 28}, 10, {})
+check("consumables filter<=thr -> due", [c["key"] for c in due] == ["filter"])
+check("consumables due sets alerted flag", na.get("filter") is True)
+# Already flagged -> not due again (alert once, no nagging).
+due2, _ = co.evaluate_consumables({"filter": 4}, 10, {"filter": True})
+check("consumables already-alerted -> not due", due2 == [])
+# Back above threshold (replaced / counter reset) -> flag cleared.
+_, na3 = co.evaluate_consumables({"filter": 100}, 10, {"filter": True})
+check("consumables replaced -> flag cleared", "filter" not in na3)
+# None reading (sensor unavailable) -> ignored, no due, flag untouched.
+due4, na4 = co.evaluate_consumables({"filter": None}, 10, {"filter": True})
+check("consumables None reading ignored", due4 == [] and na4.get("filter") is True)
+# Exactly at threshold counts as due; two low at once both fire.
+due5, _ = co.evaluate_consumables({"filter": 10, "side_brush": 3}, 10, {})
+check("consumables at-threshold + multi due",
+      sorted(c["key"] for c in due5) == ["filter", "side_brush"])
 
 print()
 print("RESULT:", "ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}")
