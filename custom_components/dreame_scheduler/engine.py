@@ -241,6 +241,13 @@ _BEACH_ERROR_WORDS = (
 # 'wheell_speed', live 2026-08-11: recurring right-wheel faults). A plain 'wheel'
 # stays in the recoverable list — only these specific faults are hardware.
 _HARDWARE_ERROR_WORDS = ("wheel_motor", "wheel_speed", "wheell_speed")
+# A DOCK/STATION setup fault — the robot can't get itself ready to clean at the
+# dock, most commonly "mop install failed" (it couldn't mount the mop pads).
+# No manoeuvre helps and the mop rooms can't run, so we don't reverse/retry — we
+# tell the user to fix the station and END the run (live 2026-08-12: pebbles
+# knocked off a plant were vacuumed up and jammed the mop-pad mount; the daily
+# run then sat wedged open for hours on 'mop install failed').
+_STATION_ERROR_WORDS = ("install", "mount")
 # A cable / cord / cloth TANGLE (the robot reports it as a 'suffocate' — it can't
 # advance). One gentle reverse is worth a try in case it's a loose cord it can
 # back off, but repeating it just DRAGS the tangle around — and dragging counts
@@ -519,6 +526,16 @@ class SchedulerEngine:
             return False
         err = (self._sval(entity_of("sensor", self._prefix, SUF_ERROR)) or "").lower()
         return bool(err) and any(w in err for w in _TANGLE_ERROR_WORDS)
+
+    def _station_error(self) -> bool:
+        """True if the vacuum is in error AND the text is a DOCK/STATION setup
+        fault (e.g. 'mop install failed' — it can't mount the mop pads). No
+        manoeuvre helps and the mop rooms can't run: the user must clear/re-seat
+        the station. Kept off the recoverable path so we never reverse-out of it."""
+        if not self._error_active():
+            return False
+        err = (self._sval(entity_of("sensor", self._prefix, SUF_ERROR)) or "").lower()
+        return bool(err) and any(w in err for w in _STATION_ERROR_WORDS)
 
     def _error_text(self) -> str | None:
         """The robot's RAW current error code/text (e.g. 'right_wheel_speed'), or
@@ -811,6 +828,39 @@ class SchedulerEngine:
         _LOGGER.info("needs-hand (%s) near %s at %s", cause, where, pos)
         return True
 
+    async def _handle_station(self, run: dict, now: datetime) -> bool:
+        """A dock/station setup fault — the robot can't get ready to clean, almost
+        always 'mop install failed' (it couldn't mount the mop pads). No manoeuvre
+        helps and the mop rooms can't run, so tell the user plainly and END the run
+        (deferring the un-done rooms) rather than leaving it wedged open blocking
+        the next dispatch. Not a floor-stuck — the fix is at the dock."""
+        if run.get("notified_station"):
+            return True
+        run["notified_station"] = True
+        run["errored"] = True
+        self._help_pending = True   # so an "all clear" fires once it's sorted
+        raw = self._error_text() or "mop install failed"
+        remaining = ", ".join(run.get("seg_names", {}).get(str(s), f"Room {s}")
+                              for s in run.get("segments", [])) or "the mop rooms"
+        await self.tracker.async_log_stuck({
+            "ts": now.isoformat(), "room": "dock", "x": None, "y": None,
+            "error": f"station ({raw})", "kind": run.get("kind"),
+            "attempt": 0, "run_id": run.get("started"), "beached": False,
+        })
+        if bool(self._opt(OPT_NOTIFY_STUCK, DEFAULT_NOTIFY_STUCK)):
+            await self._notify(
+                "🧩 Vacuum can't set up at the dock",
+                f"It couldn't mount its mop pads, so {remaining} won't get mopped. "
+                "Check the mop pads are seated properly in the dock's tray and that "
+                "the tray is clear (something jammed?), then it'll pick them up next "
+                f"run.\n\nReported error: {raw}",
+                high_priority=True,
+            )
+        self._set_status("error", f"can't set up at the dock — {raw}")
+        # End the run so it doesn't sit open forever; un-done rooms defer to catch-up.
+        await self._finalize_run(run, now, interrupted=True)
+        return True
+
     async def _maybe_all_clear(self, now: datetime) -> None:
         """After a 'needs help' alert, tell the user ONCE when the robot has
         sorted itself out and is back on the dock — so a self-recovered rescue
@@ -980,6 +1030,11 @@ class SchedulerEngine:
     async def _maybe_auto_recover(self, run: dict, now: datetime) -> bool:
         """Unstick a wedged robot and CARRY ON cleaning, rather than docking.
         Returns True if it handled this tick."""
+        # Dock/station fault (e.g. "mop install failed") — the robot can't get
+        # ready to clean and no manoeuvre helps. Tell the user and END the run so
+        # it can't wedge the scheduler; handle this before the reverse-out paths.
+        if self._station_error():
+            return await self._handle_station(run, now)
         # Beaching first, before the auto-recover gate: a lifted/high-centred
         # robot needs a hand no matter the option — reverse-out can't help it.
         if self._beached_error():
@@ -1937,6 +1992,26 @@ class SchedulerEngine:
         # until the vacuum entity reports a real state.
         if self._vacuum_state() is None:
             self._set_status("waiting", "waiting for the robot's entities to load")
+            return
+
+        # Safety net: a run that flagged an ERROR but whose robot has since made it
+        # back to the dock — no active error, not cleaning, not washing, not mid-
+        # recovery — must not sit open forever blocking the next dispatch. Finalise
+        # it as interrupted so the un-done rooms defer to the catch-up. We require
+        # the `errored` flag, so a HEALTHY suspended run (paused for presence,
+        # waiting to resume when the house empties) is untouched — only an errored
+        # one is cleared, since an errored task can't cleanly resume from its
+        # breakpoint anyway. (Live 2026-08-12: a 'mop install failed' run went
+        # suspended+errored and sat wedged ~9 h; SUSPEND_MAX_SECONDS is a 24 h
+        # backstop, far too slow to unblock the next day's run.)
+        st = self.hass.states.get(self._vacuum_entity)
+        servicing = bool(st and (st.attributes.get("washing") or st.attributes.get("drying")))
+        if (run.get("errored") and not run.get("recovering")
+                and not self._error_active() and not servicing
+                and self._at_dock()
+                and (self._vacuum_state() or "") in ("docked", "idle", "paused")):
+            _LOGGER.info("finalising orphaned errored run — robot docked and clear again")
+            await self._finalize_run(run, now, interrupted=True)
             return
 
         # (beta) Map-resume: the task was suspended at the dock when someone came

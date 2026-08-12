@@ -3,6 +3,25 @@
 All notable changes to the Dreame Scheduler integration and its companion
 add-on are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] — 2026-08-12
+
+Handles a dock/station fault (can't mount the mop pads) cleanly.
+
+### Integration (`custom_components/dreame_scheduler`)
+- **Station / mop-install alert.** A dock setup fault — most commonly
+  **"mop install failed"** (the robot can't mount its mop pads) — now gets its
+  own clear alert ("🧩 can't set up at the dock — check the mop pads are seated
+  and the tray's clear"), with the real error code, instead of a generic "stuck".
+  The robot can't fix this itself, so the run is **ended** (un-done rooms defer to
+  the catch-up) rather than left retrying.
+- **No more wedged runs.** A run that errored but whose robot has since returned
+  to the dock (no active error, parked, not mid-recovery) is now finalised as
+  interrupted instead of sitting open — previously an errored *suspended* run
+  could block the next day's dispatch for up to 24 h. Healthy suspended runs
+  (paused for presence, waiting to resume when empty) are unaffected. Fixes a live
+  case where pebbles knocked off a plant were vacuumed up, jammed the mop-pad
+  mount, and left the daily run stuck for hours.
+
 ## [0.3.0] — 2026-08-10
 
 Maintenance / consumable alerts.
