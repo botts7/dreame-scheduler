@@ -3,6 +3,20 @@
 All notable changes to the Dreame Scheduler integration and its companion
 add-on are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.2] — 2026-08-13
+
+Stops a station fault from re-blocking cleaning the next day.
+
+### Integration (`custom_components/dreame_scheduler`)
+- **A station fault no longer comes back to haunt you.** When a dock fault ends a
+  run ("mop install failed"), the scheduler now **stops the robot's task** so its
+  firmware can't auto-resume the doomed mop job (Dreame firmware re-runs a paused
+  task on its own — which then fails again and "blocks" cleaning the next day),
+  and it **no longer queues an auto-retry**. The un-done rooms simply stay pending
+  for the weekly catch-up, which picks them up once the station's fixed — instead
+  of hammering a broken mop every time the house empties. Fixes a case where a
+  jammed mop-pad mount left the same three rooms failing across days.
+
 ## [0.3.1] — 2026-08-12
 
 Handles a dock/station fault (can't mount the mop pads) cleanly.

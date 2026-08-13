@@ -831,34 +831,48 @@ class SchedulerEngine:
     async def _handle_station(self, run: dict, now: datetime) -> bool:
         """A dock/station setup fault — the robot can't get ready to clean, almost
         always 'mop install failed' (it couldn't mount the mop pads). No manoeuvre
-        helps and the mop rooms can't run, so tell the user plainly and END the run
-        (deferring the un-done rooms) rather than leaving it wedged open blocking
-        the next dispatch. Not a floor-stuck — the fix is at the dock."""
+        helps and the mop rooms can't run until the station is fixed BY HAND, so:
+        tell the user plainly, DROP the robot's task (else the firmware auto-resumes
+        the doomed mop job and 'blocks' cleaning again next time — live 2026-08-13),
+        and END the run WITHOUT queuing an auto-retry. The rooms stay pending for
+        the weekly catch-up, which won't hammer a broken mop the way resume does."""
         if run.get("notified_station"):
             return True
         run["notified_station"] = True
         run["errored"] = True
         self._help_pending = True   # so an "all clear" fires once it's sorted
         raw = self._error_text() or "mop install failed"
-        remaining = ", ".join(run.get("seg_names", {}).get(str(s), f"Room {s}")
-                              for s in run.get("segments", [])) or "the mop rooms"
+        segs = [str(s) for s in run.get("segments", [])]
+        remaining = ", ".join(run.get("seg_names", {}).get(s, f"Room {s}")
+                              for s in segs) or "the mop rooms"
+        # Drop the robot's paused/errored task so its firmware can't auto-resume a
+        # mop job that will just fail again and re-block cleaning.
+        await self._svc("vacuum", "stop", {"entity_id": self._vacuum_entity})
         await self.tracker.async_log_stuck({
             "ts": now.isoformat(), "room": "dock", "x": None, "y": None,
             "error": f"station ({raw})", "kind": run.get("kind"),
             "attempt": 0, "run_id": run.get("started"), "beached": False,
         })
+        # End the run without an auto-retry: clear the resume queue (don't hammer a
+        # broken mop when the house next empties) and clear active_run. The rooms
+        # are simply left un-cleaned/pending → the weekly catch-up gets them once
+        # the station's fixed.
+        await self.tracker.async_set_resume(None)
+        await self.tracker.async_set_last_run({
+            "kind": run.get("kind"), "finished": now.isoformat(), "interrupted": True,
+            "cleaned": [], "remaining": [run.get("seg_names", {}).get(s, s) for s in segs],
+        })
+        await self.tracker.async_set_active_run(None)
         if bool(self._opt(OPT_NOTIFY_STUCK, DEFAULT_NOTIFY_STUCK)):
             await self._notify(
                 "🧩 Vacuum can't set up at the dock",
                 f"It couldn't mount its mop pads, so {remaining} won't get mopped. "
                 "Check the mop pads are seated properly in the dock's tray and that "
-                "the tray is clear (something jammed?), then it'll pick them up next "
-                f"run.\n\nReported error: {raw}",
+                "the tray is clear (something jammed?) — then they'll be picked up on "
+                f"the weekly catch-up.\n\nReported error: {raw}",
                 high_priority=True,
             )
         self._set_status("error", f"can't set up at the dock — {raw}")
-        # End the run so it doesn't sit open forever; un-done rooms defer to catch-up.
-        await self._finalize_run(run, now, interrupted=True)
         return True
 
     async def _maybe_all_clear(self, now: datetime) -> None:
