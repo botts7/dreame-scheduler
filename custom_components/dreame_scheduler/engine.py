@@ -352,6 +352,10 @@ class SchedulerEngine:
         # repositioning in place, Blocked while returning) — which the movement-based
         # watchdogs miss because a twitch re-arms them. Reset when it docks.
         self._progress_ref: dict | None = None
+        # Sticky "heading to the dock" flag — the no-progress watchdog only watches
+        # the return trip (set when returning, held through a reposition, cleared
+        # on dock), so it can't false-fire during a normal long clean.
+        self._homing = False
         # Throttle for the wear-part life check (they change over hours, not ticks).
         self._consumables_checked_at: datetime | None = None
         # Serialises evaluations AND manual actions: state-event re-evaluations
@@ -894,24 +898,37 @@ class SchedulerEngine:
         _LOGGER.info("all-clear: robot recovered and docked after a help alert")
 
     async def _watch_no_progress(self, now: datetime) -> None:
-        """Catch a robot that's MOVING but getting nowhere — circling, repositioning
-        in place, or Blocked while trying to return — and ask for a hand. The
-        movement-based watchdogs miss this because any twitch re-arms their 'did it
-        move' check, so here we track PRODUCTIVE progress instead. Runs every tick,
-        for scheduler AND manual/native runs. Deduped against the other rescue
-        alerts via _help_pending, and longer-fused so it's a clean backstop.
+        """Catch a robot that's trying to get to the dock but CAN'T — circling,
+        repositioning, or Blocked on the way home — and ask for a hand.
 
-        Productive = ANY of: the robot's task-progress % climbed, its cleaned m²
-        climbed, or it netted STUCK_MIN_ESCAPE_MM closer to the dock since the last
-        productive moment. Progress% is the key signal while cleaning (fine-grained,
-        so slow-but-real cleaning doesn't false-trip); the distance term is anchored
-        fresh at each productive moment (not at the dock, where the run starts) so a
-        genuine return home reads as productive while a stuck return still fires."""
+        Only watches the RETURN trip. While the robot is actively CLEANING it moves
+        for ages without the productivity metrics climbing — an auto-reclean pass
+        re-covers already-counted floor (cleaned m² + task% sit flat), and those
+        integer counters plateau in slow sections — so watching mid-clean false-fired
+        'can't get home' during normal long mop cleans (live 2026-08-14, 3x). The
+        'can't get home' alert doesn't even apply mid-clean, so we gate to homing.
+
+        `_homing` is sticky: set once the robot heads for the dock, held THROUGH a
+        reposition (which briefly flips it back to 'cleaning'), and cleared only
+        when it actually docks — so the original case (sent home, can't get back
+        after a reposition — 08-11) still fires, while a normal clean never arms it.
+
+        Productive during the return = it netted STUCK_MIN_ESCAPE_MM closer to the
+        dock (or its task%/cleaned-m² still happened to climb) since the last
+        productive moment; the distance anchor resets fresh each time."""
         pos = self._vacuum_position()
         if pos is None:
             return
         if self._at_dock(pos):
             self._progress_ref = None          # home -> reset
+            self._homing = False
+            return
+        st = self.hass.states.get(self._vacuum_entity)
+        if (st and st.attributes.get("returning")) or (self._vacuum_state() or "") == "returning":
+            self._homing = True                # sticky until it docks
+        if not self._homing:
+            # Actively cleaning, not heading home — don't watch (see docstring).
+            self._progress_ref = None
             return
         dock = self._charger_position()
         dist = (math.hypot(pos[0] - dock[0], pos[1] - dock[1])
@@ -3055,7 +3072,8 @@ class SchedulerEngine:
             if pct is None:
                 continue
             out.append({"key": c["key"], "name": c["name"], "emoji": c["emoji"],
-                        "percent": pct, "low": pct <= threshold})
+                        "percent": pct, "low": pct <= threshold,
+                        "reset_entity": entity_of("button", self._prefix, c["reset"])})
         out.sort(key=lambda x: x["percent"])
         return out
 

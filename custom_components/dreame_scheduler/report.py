@@ -189,6 +189,9 @@ def _robot(hass: HomeAssistant, engine, prefix: str) -> dict:
         "clean_water": _sval(hass, e("sensor", prefix, SUF_CLEAN_WATER)),
         "dirty_water": _sval(hass, e("sensor", prefix, SUF_DIRTY_WATER)),
         "cleaned_area": _sval(hass, e("sensor", prefix, "cleaned_area")),
+        # Wear-part life (filter/brushes/mop/sensors/…) + each part's reset button,
+        # so the add-on can show a maintenance panel with one-tap Reset.
+        "consumables": engine._consumables_snapshot(),
     }
 
 

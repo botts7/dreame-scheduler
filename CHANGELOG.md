@@ -3,6 +3,36 @@
 All notable changes to the Dreame Scheduler integration and its companion
 add-on are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.4] — 2026-08-15
+
+Stops false "can't get home" alerts during normal long cleans.
+
+### Integration (`custom_components/dreame_scheduler`)
+- **"Can't get home" watchdog now only watches the return trip.** It was firing
+  mid-clean during long runs — an auto-reclean pass re-covers already-counted
+  floor, so cleaned-m² and task-% sit flat even though the robot is cleaning fine,
+  and the watchdog mistook that for "stuck, can't get home" (live 2026-08-14: 3
+  false alerts during one mop clean). It now arms only once the robot is heading
+  for the dock (sticky through a mid-return reposition, cleared when it docks), so
+  a normal clean never trips it — while the real case (sent home, can't get back)
+  still fires. Genuine mid-clean stalls are still caught by the silent-stuck
+  (no-movement) watchdog and real error handling.
+
+## [0.3.3] — 2026-08-13
+
+Maintenance panel in the add-on with one-tap counter resets.
+
+### Add-on
+- New **Maintenance** card on the Report tab: shows the remaining life of every
+  wear part (filter, brushes, mop pad, sensors, detergent, silver-ion) as a bar,
+  with a **Reset** button on each — tap it after you've replaced a part and it
+  presses the robot's own reset so the counter starts fresh. No more hunting for
+  the notification button or the native entity.
+
+### Integration (`custom_components/dreame_scheduler`)
+- The report/robot data now includes each consumable's remaining-life % and its
+  reset-button entity, so the add-on (and dashboards) can render the panel above.
+
 ## [0.3.2] — 2026-08-13
 
 Stops a station fault from re-blocking cleaning the next day.
