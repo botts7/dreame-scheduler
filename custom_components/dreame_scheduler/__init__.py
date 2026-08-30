@@ -61,6 +61,13 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
         hass.data[DOMAIN].pop(entry.entry_id, None)
+        # Services are registered once for the whole domain (not per-entry). When
+        # the last entry is gone, remove them all so none linger in the service
+        # picker after uninstall. Enumerated from the registry so the set can't
+        # drift out of sync with what was registered.
+        if not hass.data.get(DOMAIN):
+            for service in list(hass.services.async_services().get(DOMAIN, {})):
+                hass.services.async_remove(DOMAIN, service)
     return unloaded
 
 

@@ -151,9 +151,10 @@ credit rooms the robot never reached.
 
 ## Status
 
-v0.1.0 — core verified live (config/options flow, room discovery, dispatch,
-metric-based completion). Full run-to-completion + door/interrupt end-to-end
-verification in progress.
+Stable — verified live end-to-end: config/options flow, room discovery,
+dispatch, metric-based completion, and full run-to-completion including
+door/interrupt handling. See the [CHANGELOG](CHANGELOG.md) for what each
+release added.
 
 ### Roadmap
 - Vacuum-before-mop ordering (sweep-then-mop / two-phase whole-house) to avoid

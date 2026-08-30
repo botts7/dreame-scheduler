@@ -3,6 +3,26 @@
 All notable changes to the Dreame Scheduler integration and its companion
 add-on are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.5] — 2026-08-30
+
+HACS review fixes (PR [hacs/default#9098]).
+
+### Integration (`custom_components/dreame_scheduler`)
+- **`manifest.json`** now declares `integration_type: service` (it schedules on
+  top of `dreame_vacuum` and owns no hardware), instead of defaulting to `hub`.
+- **`async_unload_entry`** now removes the domain-wide `dreame_scheduler.*`
+  services when the last config entry is unloaded, so they no longer linger in
+  the service picker after uninstall.
+
+### Card (`www/dreame-scheduler-card.js`)
+- Escape all freeform device/app text (room names, error strings, chip states,
+  next-run fields) before it goes into `innerHTML`, so a value containing markup
+  renders as text, not HTML.
+
+### Docs
+- README **Status** block updated to reflect the shipped state (was still
+  reading v0.1.0 "verification in progress").
+
 ## [0.3.4] — 2026-08-15
 
 Stops false "can't get home" alerts during normal long cleans.

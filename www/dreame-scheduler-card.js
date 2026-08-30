@@ -60,7 +60,7 @@ class DreameSchedulerCard extends HTMLElement {
     const ids = this._ids();
     const s = hass.states[ids.status];
     if (!s) {
-      this.innerHTML = `<ha-card><div style="padding:16px;color:var(--error-color,#c00)">Unknown entity: ${ids.status}</div></ha-card>`;
+      this.innerHTML = `<ha-card><div style="padding:16px;color:var(--error-color,#c00)">Unknown entity: ${_esc(ids.status)}</div></ha-card>`;
       return;
     }
     const a = s.attributes || {};
@@ -135,6 +135,10 @@ customElements.define("dreame-scheduler-card", DreameSchedulerCard);
 // everything from the one scheduler status sensor's attributes, so — like the
 // main card — a single entity is all the config they need.
 const _cap = (s) => (s ? String(s).replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()) : "—");
+// Escape freeform device/app text (room names, error strings, chip states) before it goes into
+// innerHTML — these come from the Dreame app/device and could otherwise inject markup.
+const _esc = (v) => String(v == null ? "" : v).replace(/[&<>"']/g, (c) => (
+  { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 function _stubStatus(hass) {
   const found = Object.keys(hass.states || {}).find(
     (id) => id.startsWith("sensor.") && id.endsWith("_scheduler_status"));
@@ -165,19 +169,19 @@ class DreameRobotCard extends HTMLElement {
     const hass = this._hass, cfg = this._config;
     if (!hass || !cfg) return;
     const s = hass.states[cfg.entity];
-    if (!s) { this.innerHTML = `<ha-card><div style="padding:16px;color:var(--error-color,#c00)">Unknown entity: ${cfg.entity}</div></ha-card>`; return; }
+    if (!s) { this.innerHTML = `<ha-card><div style="padding:16px;color:var(--error-color,#c00)">Unknown entity: ${_esc(cfg.entity)}</div></ha-card>`; return; }
     const r = (s.attributes && s.attributes.robot) || {};
     const bat = (r.battery != null) ? Math.round(r.battery) + "%" : "—";
     const batIcon = (r.battery != null && r.battery < 20) ? "🪫" : "🔋";
     const errNorm = r.error ? String(r.error).toLowerCase().replace(/_/g, " ").trim() : "";
     const err = errNorm && !["none", "no error", "0", "ok"].includes(errNorm) ? r.error : null;
-    const chip = (lbl, v) => v ? `<span class="dsc2-chip">${lbl} ${_cap(v)}</span>` : "";
+    const chip = (lbl, v) => v ? `<span class="dsc2-chip">${lbl} ${_esc(_cap(v))}</span>` : "";
     const chips = chip("🗑️", r.dust_bag) + chip("💧", r.clean_water) + chip("🪣", r.dirty_water);
     this.innerHTML = `<ha-card><style>${_CARD_CSS}</style><div class="dsc2">
-      <div class="dsc2-h">🤖 ${cfg.title || "Robot status"}</div>
-      <div class="dsc2-top"><span class="dsc2-state">🧭 ${_cap(r.status || r.vacuum_state)}</span><span class="dsc2-bat">${batIcon} ${bat}</span></div>
-      ${r.current_room ? `<div class="dsc2-row">📍 In <b>${r.current_room}</b></div>` : ""}
-      ${err ? `<div class="dsc2-row dsc2-err">⚠️ ${_cap(err)}</div>` : ""}
+      <div class="dsc2-h">🤖 ${_esc(cfg.title || "Robot status")}</div>
+      <div class="dsc2-top"><span class="dsc2-state">🧭 ${_esc(_cap(r.status || r.vacuum_state))}</span><span class="dsc2-bat">${batIcon} ${bat}</span></div>
+      ${r.current_room ? `<div class="dsc2-row">📍 In <b>${_esc(r.current_room)}</b></div>` : ""}
+      ${err ? `<div class="dsc2-row dsc2-err">⚠️ ${_esc(_cap(err))}</div>` : ""}
       ${chips ? `<div class="dsc2-chips">${chips}</div>` : ""}
     </div></ha-card>`;
   }
@@ -197,16 +201,16 @@ class DreamePresenceCard extends HTMLElement {
     const hass = this._hass, cfg = this._config;
     if (!hass || !cfg) return;
     const s = hass.states[cfg.entity];
-    if (!s) { this.innerHTML = `<ha-card><div style="padding:16px;color:var(--error-color,#c00)">Unknown entity: ${cfg.entity}</div></ha-card>`; return; }
+    if (!s) { this.innerHTML = `<ha-card><div style="padding:16px;color:var(--error-color,#c00)">Unknown entity: ${_esc(cfg.entity)}</div></ha-card>`; return; }
     const a = s.attributes || {};
     let presence;
     if (!a.presence_configured) presence = `<div class="dsc2-row dsc2-muted">No presence entities set — runs aren't presence-gated.</div>`;
     else presence = `<div class="dsc2-state">${a.presence_home === true ? "🏠 Someone's home" : a.presence_home === false ? "🚶 Everyone's out" : "❓ Presence unknown"}</div>`;
     const next = a.next_run_day
-      ? `<div class="dsc2-row">⏰ Next run <b>${a.next_run_day}</b> at <b>${a.next_run_time}</b></div>`
+      ? `<div class="dsc2-row">⏰ Next run <b>${_esc(a.next_run_day)}</b> at <b>${_esc(a.next_run_time)}</b></div>`
       : `<div class="dsc2-row dsc2-muted">No upcoming scheduled run — enable rooms &amp; days.</div>`;
     this.innerHTML = `<ha-card><style>${_CARD_CSS}</style><div class="dsc2">
-      <div class="dsc2-h">🏠 ${cfg.title || "Presence & next run"}</div>
+      <div class="dsc2-h">🏠 ${_esc(cfg.title || "Presence & next run")}</div>
       ${presence}
       ${next}
     </div></ha-card>`;
