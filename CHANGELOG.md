@@ -3,6 +3,14 @@
 All notable changes to the Dreame Scheduler integration and its companion
 add-on are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.1] — 2026-09-23
+
+### Add-on (`addon/`)
+- **Never-mop parity.** The add-on's room editor gained the "Mop cadence" dropdown
+  ("Never — sweep only" … "Every 7th clean"), so an all-rug room can be set to never
+  mop from the add-on too, matching the integration's config screen. Also added the
+  holiday-pause and stale-tracker fields that landed in 0.5.0.
+
 ## [0.5.0] — 2026-09-23
 
 Presence-smart scheduling: clean more than once a day, catch up on any free day,

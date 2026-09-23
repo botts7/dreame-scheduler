@@ -328,6 +328,7 @@ function renderRooms() {
       <label><span>Mode</span>${optSelectHTML("mode", CFG.modes, rc.mode)}</label>
       <label><span>Suction</span>${optSelectHTML("suction", CFG.suctions, rc.suction)}</label>
       <label><span>Mop wetness <em>(blank = default)</em></span><input type="text" data-f="wetness" value="${esc(rc.wetness ?? "")}"></label>
+      <label><span>Mop cadence</span>${mopEverySelectHTML(rc.mop_every)}</label>
       <label><span>Passes</span><input type="number" min="1" max="3" data-f="repeats" value="${esc(rc.repeats || 1)}"></label>
       <label><span>Door sensor <em>(skip when shut)</em></span>${doorSelectHTML(doorSensors, rc.door_sensor)}</label>
       <div class="wide times-editor" data-times-editor><span>Extra times <em>(clean this room more than once a day; blank = just the daily time)</em></span></div>
@@ -341,7 +342,9 @@ function renderRooms() {
     });
     // bind extra inputs
     const sels = $$("select[data-f]", td), inps = $$("input[data-f]", td);
-    sels.forEach(s => s.addEventListener("change", () => { rc[s.dataset.f] = s.value; }));
+    sels.forEach(s => s.addEventListener("change", () => {
+      rc[s.dataset.f] = s.dataset.f === "mop_every" ? Number(s.value) : s.value;
+    }));
     inps.forEach(inp => inp.addEventListener("change", () => {
       rc[inp.dataset.f] = inp.dataset.f === "repeats" ? Number(inp.value) : inp.value;
     }));
@@ -400,6 +403,20 @@ function collectRoomTimes(times) {
   });
   const keys = Object.keys(seen).sort();
   return keys.length ? keys.map(k => seen[k]) : undefined;
+}
+
+// Per-room mop cadence: 0 = never mop (all-rug room), 1 = every clean, 2..7 = every Nth.
+// Mirrors the HA config-flow dropdown so both surfaces set the same option.
+function mopEverySelectHTML(selected) {
+  const opts = [
+    [0, "Never — sweep only (all-rug room)"], [1, "Every clean"],
+    [2, "Every 2nd clean"], [3, "Every 3rd clean"], [4, "Every 4th clean"],
+    [5, "Every 5th clean"], [6, "Every 6th clean"], [7, "Every 7th clean"],
+  ];
+  const cur = (selected === undefined || selected === null || selected === "") ? 1 : Number(selected);
+  return `<select data-f="mop_every">` +
+    opts.map(([v, l]) => `<option value="${v}"${cur === v ? " selected" : ""}>${esc(l)}</option>`).join("") +
+    `</select>`;
 }
 
 function optSelectHTML(field, items, selected) {
