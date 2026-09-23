@@ -46,8 +46,25 @@ _Report — per-room status this week, why rooms were missed, and the robot's ow
   entities, with a grace delay so it doesn't launch the moment you leave.
 - **Per-room schedule** — assign each room to specific weekdays, with its own
   cleaning mode / suction / mop wetness (discovered live from your vacuum).
+- **More than once a day, per room** — give a room its own list of extra clean
+  times, each a full clean or a **vacuum-only** pass (e.g. a quick midday sweep
+  of the kitchen). Every extra pass is presence- and window-gated like any run.
+- **Never mop the rugs** — set a room's mop cadence to **Never (sweep only)** so
+  an all-rug room always sweeps, even if the robot's own mode for it is mop; or
+  mop every Nth clean.
 - **Weekly whole-house guarantee** — tracks what's been cleaned since the start
   of the week and, on your catch-up day, finishes whatever's still pending.
+- **Opportunistic catch-up** (opt-in) — if a day's clean keeps getting blocked
+  by someone being home, the pending rooms are caught up the next time the house
+  is empty on *any* day, instead of waiting for the one weekly catch-up day.
+- **Holiday / extended-away pause** (opt-in) — once everyone's been away a set
+  number of days and the house is already clean, cleaning pauses instead of
+  re-cleaning an empty house; it resumes as soon as someone's home.
+- **Edge cleaning** — a dedicated pass that sweeps along each room's walls, on a
+  cadence or on demand, self-tuning to each room from observed cleaning.
+- **Stale-tracker watchdog** (opt-in) — a presence entity that hasn't reported
+  for a set time is treated as stale and ignored, so a wedged phone stuck at
+  "home" can't silently block cleaning.
 - **Time window** — only run within an allowed window (e.g. 09:00–16:00), with
   optional overrun so a clean already running can finish.
 - **Station guards** — defer if the dust bag is full, water needs attention, or
@@ -81,6 +98,7 @@ _Report — per-room status this week, why rooms were missed, and the robot's ow
 | `dreame_scheduler.run_catchup_now` | Clean everything still pending this week |
 | `dreame_scheduler.reset_week` | Start a fresh tracking week |
 | `dreame_scheduler.clean_rooms` | Clean specific room segments now (tap-a-room) |
+| `dreame_scheduler.edge_clean` | Run a dedicated edge (perimeter) pass now |
 | `dreame_scheduler.get_config` / `set_config` | Read/write config — used by the add-on GUI |
 | `dreame_scheduler.get_report` | Weekly report data — used by the add-on GUI |
 
@@ -157,10 +175,12 @@ door/interrupt handling. See the [CHANGELOG](CHANGELOG.md) for what each
 release added.
 
 ### Roadmap
-- Vacuum-before-mop ordering (sweep-then-mop / two-phase whole-house) to avoid
-  smearing.
-- Map-based partial resume — continue only the un-cleaned area after an
-  interrupt, instead of redoing whole rooms.
+Recently shipped (see [CHANGELOG](CHANGELOG.md)): per-room never-mop, multiple
+cleans per day, opportunistic catch-up, holiday pause, edge cleaning, and a
+stale-tracker watchdog. Tracked ideas and design notes live in
+[docs/ROADMAP.md](docs/ROADMAP.md) — next up includes map-based partial resume
+(continue only the un-cleaned area after an interrupt) and a per-room "carpet"
+guard.
 
 ## Acknowledgements
 
@@ -174,6 +194,9 @@ Shaped by community suggestions — thank you:
   adaptive-scheduling direction.
 - **DatRandomBoi ("Anton")** (Home Assistant Community) — for the per-room
   **"mop every N sweeps"** cadence, mirroring a two-slider sweep/mop setup.
+- **tomofdarkness** (Home Assistant Community) — for **per-room never-mop** (all-rug
+  rooms) and **cleaning a room more than once a day** (e.g. a midday vacuum-only
+  pass of the kitchen).
 
 ## License
 

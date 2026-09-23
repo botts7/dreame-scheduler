@@ -10,8 +10,16 @@ Opens as a sidebar panel (via ingress) where you can, without editing YAML:
 
 - Set presence entities, the allowed cleaning window, battery/station guards,
   return-and-resume behaviour and notification targets.
-- Build per-room weekday schedules with per-room mode / suction / mop wetness
-  and an optional door sensor per room.
+- Build per-room weekday schedules with per-room mode / suction / mop wetness,
+  a **mop cadence** (including **Never — sweep only** for all-rug rooms), an
+  optional door sensor, and **extra clean times** so a room can clean more than
+  once a day (each time a full clean or a vacuum-only pass).
+- Turn on **opportunistic catch-up** (catch pending rooms up on any empty day)
+  and a **holiday pause** (stop re-cleaning an already-clean house on a long
+  absence) — both opt-in on the General tab.
+- Ignore a **stale presence tracker** (a phone stuck at "home" that stopped
+  reporting) after a set time, on the Presence tab.
+- Run and schedule an **edge clean** (a quiet lap along each room's walls).
 - See a **Report**: weekly per-room status, coverage thumbnails, flagged
   obstacles and a run history.
 - Copy ready-made Lovelace cards filled in with your real entity ids.

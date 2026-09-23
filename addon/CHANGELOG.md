@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.1
+
+Paired with integration 0.5.x.
+
+- **Per-room extra times** editor: add a time (time picker), tick "vacuum only"
+  per time, so a room can clean more than once a day.
+- **Mop cadence** dropdown on each room, including **Never — sweep only** for
+  all-rug rooms.
+- **General:** "Catch up on any free (empty) day" (opportunistic catch-up) and
+  "Pause cleaning on an extended absence" (holiday) toggles.
+- **Presence:** "Ignore a tracker that hasn't reported for…" (stale-tracker
+  watchdog).
+
 ## 0.4.0
 
 - New **🧭 Edge clean** card: run a dedicated edge pass now, or schedule one every
