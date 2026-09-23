@@ -92,6 +92,33 @@ clean_rooms:
           integration: dreame_vacuum
           domain: vacuum
 
+edge_clean:
+  name: Edge clean now
+  description: >-
+    Run a dedicated edge pass — the robot sweeps thin strips along the walls of
+    each room, one room at a time. Turns auto-reclean off for the run so it does
+    only the edges. Note (Phase 1): it also cleans the "invisible" room-boundary
+    edges (open doorways / where the map splits rooms), not only physical walls.
+  fields:
+    segments:
+      name: Room segments
+      description: >-
+        Room segment ids to edge-clean (as shown on the map). Leave empty to
+        edge-clean every enabled room.
+      required: false
+      example: "[4, 7, 13]"
+      selector:
+        object:
+    vacuum:
+      name: Vacuum
+      description: Target a specific robot in a multi-vacuum home. Leave empty for all.
+      required: false
+      example: vacuum.dreamebot_l20_ultra
+      selector:
+        entity:
+          integration: dreame_vacuum
+          domain: vacuum
+
 apply_learned_nogo:
   name: Apply a learned no-go zone
   description: >-

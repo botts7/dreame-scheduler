@@ -1,0 +1,20 @@
+name: "Dreame Scheduler"
+version: "0.4.0"
+slug: dreame_scheduler
+description: >
+  Configuration GUI for the Dreame Scheduler integration — presence-aware,
+  per-room cleaning schedules, weekly whole-house guarantee, quiet mode and
+  notifications, all from one panel.
+url: "https://github.com/botts7/dreame-scheduler-addon"
+arch:
+  - amd64
+  - aarch64
+  - armv7
+init: false
+ingress: true
+# Lets the backend read HA entity states (presence + door-sensor pickers) and
+# call the dreame_scheduler get_config/set_config services. SUPERVISOR_TOKEN is
+# held by the Flask backend only and is never exposed to the browser.
+homeassistant_api: true
+panel_icon: mdi:robot-vacuum-variant
+panel_title: "Dreame Scheduler"

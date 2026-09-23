@@ -3,13 +3,64 @@
 All notable changes to the Dreame Scheduler integration and its companion
 add-on are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
-## [0.3.5] — 2026-08-30
+## [0.5.0] — 2026-09-23
+
+Presence-smart scheduling: clean more than once a day, catch up on any free day,
+pause on holidays, never mop your rugs — plus fixes for the two things that bit us.
+
+### Integration (`custom_components/dreame_scheduler`)
+- **Stale presence-tracker watchdog (fix).** A presence entity that hasn't
+  reported for longer than a configurable time is now treated as stale and
+  ignored, so a phone tracker wedged at "home" can't silently block cleaning
+  forever. Opt-in ("Ignore a tracker that hasn't reported for…", 0 = off) on the
+  Presence step. This is the gap behind a real missed clean.
+- **Auditable run history (fix).** The run history now records the cleaning mode
+  actually used per room (sweep vs mop / native), not just the configured base
+  mode — so you can verify after the fact that, e.g., a carpet room swept.
+- **Holiday / extended-away pause.** New opt-in: when everyone has been away for a
+  set number of days AND the whole house is already clean, cleaning pauses instead of
+  re-cleaning an empty house every day (status: "holiday — house already clean"). The
+  first clean after you leave still runs, the weekly whole-house guarantee still gives
+  a once-a-week freshen, and normal cleaning resumes as soon as someone's home. Off by
+  default; "Days away before pausing" is configurable. Requested by botts.
+- **Opportunistic catch-up.** New opt-in "Catch up on any free (empty) day"
+  option. When a day's clean keeps getting blocked (someone home), the pending
+  rooms are cleaned the next time the house is empty on any day, instead of
+  waiting for the single weekly catch-up day. Runs at most once a day, from the
+  catch-up time, and only when the house is actually empty (same presence gate);
+  today's normal schedule still takes priority, and the fixed catch-up day stays
+  as the weekly backstop. Off by default. Requested on the HA community thread.
+- **Clean a room more than once a day.** A room can now have its own list of
+  extra clean times, so (for example) the kitchen gets a quick midday pass on
+  top of its normal clean. Each time can be a full clean or a vacuum-only pass
+  ("13:00 vac"). A room with times set runs on those instead of the global daily
+  time; leave it blank and nothing changes. Every extra pass still goes through
+  the same presence, cleaning-window and station guards as a normal run, and the
+  weekly "rooms cleaned this week" count isn't inflated by the extra passes.
+  Requested on the HA community thread (tomofdarkness).
+- Per-room "never mop" (`mop_every = 0`): an all-rug room always sweeps, even if
+  its native mode is mop. Selectable as "Never — sweep only" in the room's mop
+  cadence dropdown. (Same thread.)
+
+### Add-on (`addon/`)
+- Per-room settings gained an **Extra times** editor (add a time, tick "vacuum
+  only" per time) and the General/Presence tabs gained the opportunistic catch-up,
+  holiday-pause, and stale-tracker options — mirroring the integration.
+
+## [0.4.1] — 2026-08-29
 
 HACS review fixes (PR [hacs/default#9098]).
 
 ### Integration (`custom_components/dreame_scheduler`)
-- **`manifest.json`** now declares `integration_type: service` (it schedules on
-  top of `dreame_vacuum` and owns no hardware), instead of defaulting to `hub`.
+- **Fewer false-alarm alerts.** "Needs help" notifications are now held for a
+  90-second recovery grace before sending. If the robot is cleaning again by
+  then (a resume/re-plan sorted it out), the alert is dropped silently; a
+  genuine stuck that never resumes still alerts, just ~90s later. A later, more
+  accurate trip in the same window (e.g. recovery failed → beached) updates the
+  held message without resetting the timer.
+- **`manifest.json`** now declares `integration_type: service` (it owns no
+  hardware — it schedules on top of `dreame_vacuum`), instead of defaulting to
+  `hub`.
 - **`async_unload_entry`** now removes the domain-wide `dreame_scheduler.*`
   services when the last config entry is unloaded, so they no longer linger in
   the service picker after uninstall.
@@ -22,6 +73,27 @@ HACS review fixes (PR [hacs/default#9098]).
 ### Docs
 - README **Status** block updated to reflect the shipped state (was still
   reading v0.1.0 "verification in progress").
+
+## [0.4.0] — 2026-08-15
+
+Edge cleaning — a dedicated pass along your walls.
+
+### Integration (`custom_components/dreame_scheduler`)
+- **Edge clean.** A new run type that sweeps thin strips along each room's walls,
+  room by room in one automatic pass (zone-cleaning sequenced across the schedule
+  tick). Run it **manually** with the `dreame_scheduler.edge_clean` service
+  (optional `segments`, else every room), or on a **dedicated schedule** — every
+  N days at a set time, presence-gated like a normal run. The run turns
+  auto-reclean off for its duration (best-effort) so it does the edges, not a full
+  fill, and restores it after. Options: enable / every-N-days / time / strip width.
+- **Note:** Phase 1 uses each room's map box, so it also touches the "invisible"
+  room-boundary edges (open doorways / where the map splits rooms), not only
+  physical walls. Best results with the robot in Vacuum mode and, on robots whose
+  cloud rejects the auto-reclean change, Auto-reclean set off once in the Dreame app.
+
+### Add-on
+- New **🧭 Edge clean** card — schedule settings (enable / every N days / time /
+  strip width) and an **"Edge clean now"** button.
 
 ## [0.3.4] — 2026-08-15
 

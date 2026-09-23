@@ -31,9 +31,13 @@ from .const import (
     CONF_PREFIX,
     CONF_VACUUM_ENTITY,
     DEFAULT_AWAY_GRACE_MIN,
+    DEFAULT_PRESENCE_STALE_MIN,
     DEFAULT_CATCHUP_DAY,
     DEFAULT_CATCHUP_ENABLED,
     DEFAULT_CATCHUP_TIME,
+    DEFAULT_OPPORTUNISTIC_CATCHUP,
+    DEFAULT_HOLIDAY_ENABLED,
+    DEFAULT_HOLIDAY_AFTER_DAYS,
     DEFAULT_DAILY_TIME,
     DEFAULT_GUARD_DUSTBIN,
     DEFAULT_GUARD_WATER,
@@ -61,6 +65,11 @@ from .const import (
     DEFAULT_NOTIFY_WEEKLY,
     DEFAULT_CONSUMABLE_ALERT,
     DEFAULT_CONSUMABLE_THRESHOLD,
+    DEFAULT_EDGE_ENABLED,
+    DEFAULT_EDGE_EVERY_DAYS,
+    DEFAULT_EDGE_TIME,
+    DEFAULT_EDGE_PASSES,
+    DEFAULT_EDGE_LEARN,
     DEFAULT_REPEATS,
     DEFAULT_RESUME_WHEN_AWAY,
     DEFAULT_RETURN_ON_ARRIVAL,
@@ -77,6 +86,9 @@ from .const import (
     OPT_CATCHUP_DAY,
     OPT_CATCHUP_ENABLED,
     OPT_CATCHUP_TIME,
+    OPT_OPPORTUNISTIC_CATCHUP,
+    OPT_HOLIDAY_ENABLED,
+    OPT_HOLIDAY_AFTER_DAYS,
     OPT_DAILY_TIME,
     OPT_DEFAULT_MODE,
     OPT_DEFAULT_SUCTION,
@@ -94,6 +106,11 @@ from .const import (
     OPT_NOTIFY_WEEKLY,
     OPT_CONSUMABLE_ALERT,
     OPT_CONSUMABLE_THRESHOLD,
+    OPT_EDGE_ENABLED,
+    OPT_EDGE_EVERY_DAYS,
+    OPT_EDGE_TIME,
+    OPT_EDGE_PASSES,
+    OPT_EDGE_LEARN,
     OPT_SHOW_UNREACHABLE,
     OPT_DOOR_RETRY_ENABLED,
     OPT_DOOR_RETRY_MIN,
@@ -103,6 +120,7 @@ from .const import (
     OPT_PRERUN_MODE,
     OPT_PRERUN_TIME,
     OPT_PRESENCE_ENTITIES,
+    OPT_PRESENCE_STALE_MIN,
     OPT_QUIET_SUCTION,
     OPT_REQUIRE_AWAY,
     OPT_RESUME_WHEN_AWAY,
@@ -151,12 +169,19 @@ from .scheduler import (
     all_enabled_segments,
     choose_dispatch,
     door_open_long_enough,
+    edge_due,
+    fold_room_area,
     evaluate_progress,
     is_mopping_mode,
     needs_week_rollover,
     pending_rooms,
     rooms_due_today,
     week_start_for,
+    has_explicit_times,
+    next_slot_minute,
+    holiday_hold,
+    tracker_stale,
+    SWEEP_ONLY_MODE,
 )
 from .week_tracker import WeekTracker
 
@@ -287,6 +312,12 @@ WAKE_POLL_SECONDS = 1.5
 # Silent stuck: the robot claims to be cleaning but hasn't moved for this long,
 # with NO error to trigger auto-recover ('unable to reach', a quiet high-centre).
 SILENT_STUCK_SECONDS = 360
+# Recovery grace: a "needs help" alert isn't sent the instant a threshold trips —
+# it's held this long first. If the robot is CLEANING again before it elapses (the
+# app sorted it out: a resume/re-plan carried it on), the alert is cancelled
+# silently, killing the false positive. A genuine stuck never resumes, so its
+# alert still fires — just this many seconds later.
+HELP_GRACE_SECONDS = 90
 # STRANDED: no run in flight, yet the robot is sat away from its dock, not
 # moving. _watch_silent_stuck only runs while a run is ACTIVE, so once a run
 # finalises nothing checks the robot ever actually got home. Live 2026-07-15: a
@@ -303,6 +334,68 @@ DOCK_RADIUS_MM = 600               # within this of the charger counts as "home"
 # then wedged, with no alert. Longer than the others so it's a clean backstop.
 NO_PROGRESS_SECONDS = 480
 CONSUMABLE_CHECK_INTERVAL = 1800   # seconds between wear-part life checks (they change slowly)
+EDGE_START_SECONDS = 90            # after dispatching a room, wait this long for the robot to
+                                   # actually start before treating the room as done
+# Edge clean = ONE perimeter lap via the robot's native segment clean (it walls-follows
+# the REAL room outline first, then fills), cut to the next room once the lap is done.
+# "Lap done" = the robot's own cleaned-area counter reaching a perimeter-sized budget
+# (shape-agnostic — no room polygon needed), with a time floor + cap as backstops.
+EDGE_ROBOT_BAND_MM = 350           # a single wall-following pass covers ~this wide a band
+EDGE_LAP_AREA_MULT = 0.8           # cut once delta-area >= perimeter-band × this. Tuned live
+                                   # 2026-08-15 on Kitchen Dining: full edges done at ~7-8 m²
+                                   # cleaned (~20% progress), THEN it starts filling. perim×band
+                                   # ≈ 9.2 m², so 0.8 → budget ≈ 7.4 m², cutting right as the fill
+                                   # begins (all edges done, minimal interior). 1.25 was too high
+                                   # and let it fill a big chunk of the room. TUNABLE.
+EDGE_LAP_MIN_SPEED = 180           # mm/s assumed, to size the min-lap-time floor / cap
+EDGE_LAP_RATE_MM_S = 65            # PRIMARY cut fallback: a perimeter lap takes ~perimeter/this.
+                                   # Time is reclean-immune (unlike cleaned_area, which
+                                   # auto_recleaning corrupts) — calibrated on Kitchen Dining: edges
+                                   # done ~6.7 min for a ~26 m perimeter (26300/65 ≈ 405 s). Used
+                                   # until per-room rate-learning has enough samples.
+# Rate-learning: measure the robot's early-phase coverage RATE (m²/min) each edge run
+# and set edge_secs = edge-band-area ÷ rate — so the time-cut ADAPTS to real speed
+# (Turbo vs Quiet, furniture) per room instead of the fixed rate above. Learns from the
+# clean part of the area curve (the early climb), not the reclean-corrupted absolute area.
+EDGE_RATE_WINDOW = 150             # s into the lap to sample the coverage rate (still perimeter,
+                                   # before reclean stalls the counter)
+EDGE_RATE_MIN_SAMPLES = 2          # trust the learned rate only after this many samples
+EDGE_RATE_LO = 0.3                 # clamp learned rate to a sane m²/min band (reject outliers)
+EDGE_RATE_HI = 3.0
+EDGE_LAP_MIN_FLOOR = 60            # never cut before this many seconds of actual cleaning
+EDGE_LAP_HARD_CAP = 5.0            # pure backstop: bail at this × estimated lap time only if the
+                                   # area counter stalls. Must be big enough that the AREA budget
+                                   # governs a healthy lap (at ~1 m²/min a big room's lap takes
+                                   # ~10 min) — the old 2.5 fired mid-lap and cut edges in half.
+EDGE_PLATEAU_SECONDS = 150         # cut once cleaned_area has been FLAT this long: the robot has
+                                   # stopped covering new floor (perimeter done, auto_recleaning —
+                                   # which the cloud 500s so we can't disable — is just re-treading
+                                   # already-clean floor). MUST be comfortably longer than the gap
+                                   # between integer-m² steps during real cleaning (~60-90s at
+                                   # ~1 m²/min) or it false-cuts mid-perimeter on a slow stretch.
+                                   # This is what makes edges-only reliable even with reclean on
+                                   # (live 2026-08-15: reclean stalled the area counter so the fixed
+                                   # budget never tripped → "whole room").
+EDGE_PLATEAU_MIN_FRAC = 0.6        # ...but only after a real pass (delta ≥ this × budget), so a
+                                   # furniture-navigation stall mid-perimeter can't cut early.
+EDGE_EDGE_FRAC = 0.22              # a room's edge band ≈ this fraction of its full clean area — how
+                                   # the LEARNED real room area (from normal runs) sets the cut, so
+                                   # it self-tunes per room instead of leaning on the geometric guess.
+EDGE_LEARN_MIN_SAMPLES = 2         # trust the learned area only after this many clean samples;
+                                   # fall back to the geometric estimate until then.
+EDGE_FINISH_GRACE = 90             # s the robot must be idle (not cleaning, not charging/washing)
+                                   # before a room counts as DONE — so a mop-wash trip, a brief
+                                   # post-error return, or any transient dock trip resumes instead
+                                   # of being mistaken for 'finished' and skipping the room (live
+                                   # 2026-08-18: a mid-Entrance error cascaded the whole run to a
+                                   # premature dock because idle was treated as done instantly).
+EDGE_RESUME_BATTERY = 80           # % — while an edge run's robot is docked mid-lap AND charging
+                                   # below this, WAIT (it went to charge, resume_cleaning brings it
+                                   # back); at/above this it's charged (or finished), so stop waiting.
+EDGE_SUCTION_LEVEL = 0             # 0=Quiet: an edge tidy runs QUIET, baked into the segment
+                                   # clean call (each room's own suction is often Turbo, and the
+                                   # cloud 500s a live suction change) — the side brush still
+                                   # sweeps the wall, it's just not loud
 # How recent a beaching must be for the "tidy the floor" reminder to keep firing.
 TIDY_RECENCY_DAYS = 2
 # How long the "show me where I'm stuck" robot waits at the spot (light on) so
@@ -346,6 +439,9 @@ class SchedulerEngine:
         # set True by any rescue notify, cleared with an "all clear" once the robot
         # has recovered and made it back to the dock (see _maybe_all_clear).
         self._help_pending = False
+        # A "needs help" alert queued but held during its recovery-grace window
+        # (see _queue_help / _flush_help). {title, message, actions, image, at}.
+        self._pending_alert: dict | None = None
         # Productivity tracker for _watch_no_progress: the robot's best (closest)
         # distance-to-dock and most cleaned-area seen this episode, plus when that
         # last improved. Catches a robot that's MOVING but getting nowhere (circling,
@@ -363,6 +459,11 @@ class SchedulerEngine:
         # rooms + duplicate history entries, seen live 2026-07-09), and a manual
         # dispatch racing a tick's dispatch would double-send clean_segment.
         self._eval_lock = asyncio.Lock()
+        # Read-only per-room area observer (for edge-cut self-tuning). Tracks the
+        # room the robot is currently cleaning + its area baseline/peak so a finished
+        # room's real cleaned area can be folded into the learned estimate. In-memory
+        # only (a partial observation on restart just isn't learned — no harm).
+        self._area_obs: dict | None = None
 
     # ------------------------------------------------------------------ setup
     async def async_start(self) -> None:
@@ -815,7 +916,7 @@ class SchedulerEngine:
         self._help_pending = True   # so we can send an "all clear" once it's home
         pos = self._vacuum_position()
         await self.tracker.async_set_active_run(run)
-        await self.tracker.async_log_stuck({
+        await self._log_stuck({
             "ts": now.isoformat(),
             "room": where,
             "x": pos[0] if pos else None,
@@ -827,7 +928,7 @@ class SchedulerEngine:
             "beached": (cause == "beached"),
         })
         if bool(self._opt(OPT_NOTIFY_STUCK, DEFAULT_NOTIFY_STUCK)):
-            await self._notify(title, body, high_priority=True, actions=self._rescue_actions())
+            await self._queue_help(now, title, body, actions=self._rescue_actions())
         self._set_status("error", status_reason)
         _LOGGER.info("needs-hand (%s) near %s at %s", cause, where, pos)
         return True
@@ -852,7 +953,7 @@ class SchedulerEngine:
         # Drop the robot's paused/errored task so its firmware can't auto-resume a
         # mop job that will just fail again and re-block cleaning.
         await self._svc("vacuum", "stop", {"entity_id": self._vacuum_entity})
-        await self.tracker.async_log_stuck({
+        await self._log_stuck({
             "ts": now.isoformat(), "room": "dock", "x": None, "y": None,
             "error": f"station ({raw})", "kind": run.get("kind"),
             "attempt": 0, "run_id": run.get("started"), "beached": False,
@@ -878,6 +979,457 @@ class SchedulerEngine:
             )
         self._set_status("error", f"can't set up at the dock — {raw}")
         return True
+
+    # ------------------------------------------------- edge clean (wall strips)
+    def _room_box(self, seg):
+        """The robot map's bounding box for a room segment (x0,y0,x1,y1 mm), or
+        None if the map doesn't carry it yet. Same coord system as clean_zone."""
+        rooms = _plain_attr(self._map_attr("rooms"))
+        if not isinstance(rooms, dict):
+            return None
+        keys = [seg, str(seg)]                     # keys may be int or str in-process
+        try:
+            keys.append(int(seg))
+        except (TypeError, ValueError):
+            pass
+        r = None
+        for k in keys:
+            if k in rooms:
+                r = _plain_attr(rooms[k])
+                break
+        if not isinstance(r, dict):
+            return None
+        try:
+            return (int(r["x0"]), int(r["y0"]), int(r["x1"]), int(r["y1"]))
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    async def _set_select_safe(self, entity: str, option: str, tries: int = 3):
+        """Best-effort select_option; returns the PREVIOUS value (to restore) or
+        None. The Dreame cloud throws INTERMITTENT 500s on these, so retry a few
+        times — but never let a persistent failure break the edge run; carry on
+        with whatever the robot has (worst case: auto-reclean stays on and each
+        room gets filled, still an edge pass, just not edges-only)."""
+        st = self.hass.states.get(entity)
+        prev = st.state if st else None
+        for attempt in range(max(1, tries)):
+            try:
+                await self._svc("select", "select_option", {"entity_id": entity, "option": option})
+                return prev
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.info("edge: set %s=%s failed (try %d/%d): %s",
+                             entity, option, attempt + 1, tries, exc)
+                await asyncio.sleep(2)
+        return prev
+
+    async def _set_switch_safe(self, entity: str, on: bool, tries: int = 4) -> bool | None:
+        """Flip a Dreame switch to `on`, VERIFYING it lands (retry a few times) and
+        returning its PREVIOUS on/off (to restore) or None. Switches apply reliably —
+        unlike the suction/mode SELECTS, which the cloud 500s — which is why the edge
+        run turns off `customized_cleaning` (a switch) so its per-call Quiet suction
+        actually takes (live 2026-08-15: per-call suction was ignored while customized
+        cleaning was on, so the pass ran at each room's saved Turbo). The retry+verify
+        matters on RESTORE: right after the cut the switch is briefly 'unavailable', so
+        a single turn_on silently no-ops and leaves customized cleaning off."""
+        st = self.hass.states.get(entity)
+        prev = (st.state == "on") if st and st.state in ("on", "off") else None
+        want = "on" if on else "off"
+        for attempt in range(max(1, tries)):
+            cur = self.hass.states.get(entity)
+            if cur and cur.state == want:
+                return prev
+            try:
+                await self._svc("switch", "turn_on" if on else "turn_off", {"entity_id": entity})
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.info("edge: switch %s -> %s failed (try %d/%d): %s",
+                             entity, on, attempt + 1, tries, exc)
+            await asyncio.sleep(2)
+        return prev
+
+    async def _start_edge_run(self, segments, *, manual: bool) -> bool:
+        """Begin a dedicated edge clean over `segments` — a native per-room segment
+        clean at NORMAL power, cut to the next room once its perimeter lap is done
+        (by time). Chains room-to-room without docking; docks only to charge (then
+        resumes) or when all rooms are done. Returns True if a run started.
+
+        No quiet / customized-cleaning juggling: per-call Quiet is ignored by this
+        robot (it uses the global suction, whose select the cloud 500s), so a
+        reliable quiet-from-HA isn't possible — set Quiet in the app if wanted."""
+        segs = [str(s) for s in segments if self._room_box(s) is not None]
+        if not segs:
+            _LOGGER.info("edge: no rooms with map geometry to edge-clean")
+            return False
+        if self.tracker.active_run is not None or self.tracker.edge_run is not None:
+            return False
+        passes = max(1, int(self._opt(OPT_EDGE_PASSES, DEFAULT_EDGE_PASSES)))
+        run = {
+            "segments": segs, "done": [], "current": None,
+            "started": dt_util.now().isoformat(), "dispatched_at": None,
+            "seen_cleaning": False, "manual": bool(manual),
+            "passes": passes, "laps_done": 0,
+        }
+        await self.tracker.async_set_edge_run(run)
+        self._set_status("running", f"edge clean — {len(segs)} room(s)")
+        if bool(self._opt(OPT_NOTIFY_STUCK, DEFAULT_NOTIFY_STUCK)):
+            await self._notify("🧭 Edge clean started",
+                               f"Cleaning the wall edges of {len(segs)} room(s), one at a time.")
+        _LOGGER.info("edge run started: %s", segs)
+        return True
+
+    async def _check_edge_run(self, now: datetime, away_ok: bool) -> None:
+        """Drive the edge run room-by-room — dispatch one room's native segment
+        clean (the robot walls-follows the REAL outline first), cut to the next
+        room once its perimeter lap is done, then the next. Sequenced across ticks
+        because each clean_segment REPLACES the previous task. Presence-gated."""
+        edge = self.tracker.edge_run
+        if edge is None or self._vacuum_state() is None:
+            return
+        if (not away_ok and not edge.get("manual")
+                and bool(self._opt(OPT_REQUIRE_AWAY, DEFAULT_REQUIRE_AWAY))):
+            self._set_status("waiting", "edge clean paused — someone's home")
+            return
+        if self._error_active():
+            self._set_status("error", "edge clean paused — robot needs a hand")
+            return
+        st = self.hass.states.get(self._vacuum_entity)
+        vstate = self._vacuum_state() or ""
+        busy = (vstate in ("cleaning", "returning")
+                or bool(st and (st.attributes.get("zone_cleaning")
+                                or st.attributes.get("washing") or st.attributes.get("drying")
+                                or st.attributes.get("returning_to_wash")
+                                or st.attributes.get("washing_paused"))))
+        cleaning_now = (vstate == "cleaning" and bool(st and st.attributes.get("segment_cleaning")))
+        # Nothing dispatched yet → start the first/next room NOW, even if the robot is
+        # busy at the dock (washing/drying after a clean can take hours) — the
+        # clean_segment interrupts it. Without this a manual edge run would just wait.
+        if edge.get("current") is None:
+            await self._edge_next_or_finish(edge, now)
+            return
+        # Track when the robot is/ isn't actually cleaning this room — the debounce that
+        # keeps a transient interruption (mop-wash trip, post-error blip) from looking
+        # like the room is 'done'.
+        if cleaning_now:
+            edge["seen_cleaning"] = True
+            edge["stopped_since"] = None
+        elif edge.get("seen_cleaning") and not edge.get("stopped_since"):
+            edge["stopped_since"] = now.isoformat()
+        # Primary advance: the lap's cleaning-time reached the estimate (works whether
+        # the robot is mid-room-busy or has just idled having done enough).
+        if edge.get("seen_cleaning") and await self._edge_lap_done(edge, now):
+            return
+        if busy:                                   # cleaning / returning / washing / drying
+            await self.tracker.async_set_edge_run(edge)
+            return
+        # Robot IDLE mid-lap. Decide wait vs advance.
+        box = self._room_box(edge.get("current"))
+        _, edge_secs = self._edge_lap_budget(box, edge.get("current")) if box else (0, 0)
+        ct_secs = (self._cleaning_time_min() or 0) * 60
+        battery = st.attributes.get("battery") if st else None
+        if (box is not None and ct_secs < edge_secs and self._robot_charging()
+                and (battery is None or float(battery) < EDGE_RESUME_BATTERY)):
+            # Docked to CHARGE before the lap finished → wait (resume_cleaning brings it
+            # back). Releases at EDGE_RESUME_BATTERY so a finished room can't stall.
+            self._set_status("waiting", "edge clean — charging, will resume")
+            return
+        disp = _parse_iso(edge.get("dispatched_at"))
+        if not edge.get("seen_cleaning"):
+            if disp and (now - disp).total_seconds() < EDGE_START_SECONDS:
+                return                              # still on its way to the room
+            await self._edge_advance(edge, now)     # never started in time → skip on
+            return
+        # It cleaned, then stopped, and the lap's time-cut did NOT fire (else we'd have
+        # advanced above). With ct-based timing the robot can't finish a room before its
+        # perimeter time, so a SUSTAINED idle here means the run was stopped EXTERNALLY —
+        # the user docked it, or a persistent error. Don't march on to the next room:
+        # CANCEL. A mop-wash / post-error blip resumes within the debounce (clearing
+        # stopped_since), so it won't trip this.
+        stopped = _parse_iso(edge.get("stopped_since"))
+        if stopped is None or (now - stopped).total_seconds() < EDGE_FINISH_GRACE:
+            self._set_status("running", "edge clean — waiting for the robot")
+            await self.tracker.async_set_edge_run(edge)
+            return
+        await self._cancel_edge_run(edge, "stopped")
+
+    def _cleaning_time_min(self) -> float | None:
+        """The robot's own current-task cleaning time (minutes) — counts ACTUAL
+        cleaning and pauses while charging, so it's the right clock for the lap cut
+        (a charge break doesn't advance it) and charge-and-continue just works."""
+        st = self.hass.states.get(self._vacuum_entity)
+        val = st.attributes.get("cleaning_time") if st else None
+        try:
+            return float(val) if val is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _robot_charging(self) -> bool:
+        st = self.hass.states.get(self._vacuum_entity)
+        return bool(st and st.attributes.get("charging"))
+
+    async def _observe_room_areas(self) -> None:
+        """READ-ONLY: watch the room the robot is cleaning and fold each finished
+        room's real cleaned area into the per-room learned estimate — this is where
+        the edge cut learns each room's size, from NORMAL runs. It only reads state,
+        so it can never disturb the run logic. Skipped during an edge run (those
+        rooms are deliberately cut short, so their area isn't the full-room size)."""
+        if (not bool(self._opt(OPT_EDGE_LEARN, DEFAULT_EDGE_LEARN))
+                or self.tracker.edge_run is not None):
+            if self._area_obs:
+                self._area_obs = None
+            return
+        st = self.hass.states.get(self._vacuum_entity)
+        seg = None
+        if (st is not None and (self._vacuum_state() or "") == "cleaning"
+                and st.attributes.get("segment_cleaning")):
+            seg = st.attributes.get("current_segment")
+        area = self._cleaned_area()
+        obs = self._area_obs
+        if seg is None or area is None:                # not cleaning a segment -> close out
+            if obs:
+                await self._finalise_room_obs(obs)
+                self._area_obs = None
+            return
+        seg = str(seg)
+        if obs is None or obs.get("seg") != seg:       # moved rooms -> bank previous, start new
+            if obs:
+                await self._finalise_room_obs(obs)
+            self._area_obs = {"seg": seg, "base": area, "peak": area}
+            return
+        if area < obs["base"]:                         # counter reset mid-room -> re-baseline
+            obs["base"] = area
+        obs["peak"] = max(obs["peak"], area)
+
+    async def _finalise_room_obs(self, obs: dict) -> None:
+        """Fold a just-finished room observation into the learned estimate — unless
+        the robot is in an error state (a stuck/partial run would poison it)."""
+        if self._error_active():
+            return
+        seg = obs.get("seg")
+        box = self._room_box(seg) if seg is not None else None
+        if box is None:
+            return
+        sample = float(obs.get("peak", 0)) - float(obs.get("base", 0))
+        box_area = abs((box[2] - box[0]) * (box[3] - box[1])) / 1_000_000.0   # mm² -> m²
+        lo, hi = max(1.0, box_area * 0.15), box_area * 1.10
+        entry = fold_room_area(self.tracker.room_learn.get(seg), sample, lo, hi)
+        if entry and entry != self.tracker.room_learn.get(seg):
+            await self.tracker.async_set_room_learn(seg, entry)
+            _LOGGER.debug("learn: room %s area sample %.1fm2 -> %s", seg, sample, entry)
+
+    def _edge_lap_budget(self, box, seg=None) -> tuple[float, float]:
+        """(early-cut area m², lap seconds) for one perimeter lap. The SECONDS are the
+        PRIMARY cut — a lap takes ~perimeter/rate (a fixed, reclean-immune geometric
+        estimate; cleaned_area is corrupted by auto_recleaning + too coarse to time or
+        rate-learn from reliably). The area is only a secondary early-cut for the case
+        the robot covers the whole perimeter band fast."""
+        perim_mm = 2 * ((box[2] - box[0]) + (box[3] - box[1]))
+        band_area = (perim_mm / 1000.0) * (EDGE_ROBOT_BAND_MM / 1000.0)
+        early_area = band_area * EDGE_LAP_AREA_MULT
+        edge_secs = max(EDGE_LAP_MIN_FLOOR, perim_mm / EDGE_LAP_RATE_MM_S)
+        return early_area, edge_secs
+
+    async def _edge_lap_done(self, edge: dict, now: datetime) -> bool:
+        """True (and advances) once the current room's perimeter lap is done. PRIMARY
+        signal is the robot's own cleaning_time reaching the lap estimate — it counts
+        ACTUAL cleaning and pauses while charging, so it's reclean-immune AND makes
+        charge-and-continue free. A secondary early-cut fires if the robot covers the
+        whole perimeter band fast."""
+        cur = edge.get("current")
+        box = self._room_box(cur) if cur is not None else None
+        if box is None or not edge.get("seen_cleaning"):
+            return False
+        early_area, edge_secs = self._edge_lap_budget(box, cur)
+        ct_secs = (self._cleaning_time_min() or 0) * 60.0     # actual cleaning; pauses on charge
+        if ct_secs < EDGE_LAP_MIN_FLOOR:               # too soon — let the lap get going
+            return False
+        if ct_secs >= edge_secs:                       # PRIMARY: time-based lap done
+            _LOGGER.info("edge: %s lap done by time (%ds >= %ds) — next room",
+                         cur, int(ct_secs), int(edge_secs))
+            return await self._edge_advance(edge, now)
+        area = self._cleaned_area()                    # SECONDARY: covered the band fast
+        if area is not None:
+            a0 = edge.get("area0")
+            if a0 is None or area < a0:
+                edge["area0"] = a0 = area
+                await self.tracker.async_set_edge_run(edge)
+            if (area - a0) >= early_area:
+                _LOGGER.info("edge: %s covered band early (%.1fm2 in %ds) — next room",
+                             cur, area - a0, int(ct_secs))
+                return await self._edge_advance(edge, now)
+        return False
+
+    async def _edge_advance(self, edge: dict, now: datetime) -> bool:
+        """A perimeter lap of the current room just finished. Do ANOTHER lap of the
+        SAME room if more passes are wanted (opt-in ``edge_passes`` — loop the edges
+        to get them properly clean), otherwise mark it done and move to the next
+        room (or finish)."""
+        cur = edge.get("current")
+        if cur is not None:
+            laps = int(edge.get("laps_done", 0)) + 1
+            passes = max(1, int(edge.get("passes", 1)))
+            if laps < passes:                          # re-run the same room's edges
+                edge["laps_done"] = laps
+                await self._edge_dispatch(edge, cur, now, extra=f" (pass {laps + 1}/{passes})")
+                return True
+            edge["done"].append(cur)
+        edge["current"] = None
+        edge["seen_cleaning"] = False
+        edge["area0"] = None
+        edge["laps_done"] = 0
+        await self._edge_next_or_finish(edge, now)
+        return True
+
+    async def _edge_dispatch(self, edge: dict, seg, now: datetime, extra: str = "") -> None:
+        """Dispatch one perimeter lap of `seg` (a native segment clean, NORMAL power),
+        and reset the per-lap trackers. Shared by first-dispatch, next-room and re-pass.
+        A new clean_segment redirects the robot straight from a cut room to the next —
+        no trip to the dock between."""
+        edge["current"] = seg
+        edge["dispatched_at"] = now.isoformat()
+        edge["seen_cleaning"] = False
+        edge["stopped_since"] = None
+        edge["area0"] = None
+        await self.tracker.async_set_edge_run(edge)
+        await self._send_clean_segment([int(seg)])
+        self._set_status("running", f"edge clean — {self._room_name(seg)}{extra}")
+        _LOGGER.info("edge: perimeter lap of %s%s", seg, extra)
+
+    async def _edge_next_or_finish(self, edge: dict, now: datetime) -> None:
+        """Dispatch the next room's native segment clean, or finalize if none remain.
+        A new clean_segment replaces the current task, so this also redirects the
+        robot straight from a cut room to the next — no trip to the dock between."""
+        while edge["segments"]:
+            seg = edge["segments"].pop(0)
+            if not str(seg).isdigit():
+                continue
+            # NB: don't skip on a missing room_box here — the room was validated at
+            # start, and the map camera transiently drops its 'rooms' attribute during
+            # a state transition (live 2026-08-18: Lounge was dropped from the chain
+            # that way). Dispatch it; the lap cut tolerates a momentary None box.
+            edge["laps_done"] = 0
+            await self._edge_dispatch(edge, seg, now)
+            return
+        await self._finish_edge_run(edge, now)
+
+    async def _cancel_edge_run(self, edge: dict, reason: str) -> None:
+        """Abandon the whole edge run (not just the current room) — e.g. the user
+        docked the robot mid-run, or it errored out. Sends it home and clears the run
+        so it does NOT march on to the next room (live 2026-08-18: a manual dock got
+        overridden and the robot went back out)."""
+        await self._svc("vacuum", "return_to_base", {"entity_id": self._vacuum_entity})
+        # Mark today done so a SCHEDULED run doesn't immediately re-fire and fight the
+        # user's stop; a manual run just ends.
+        await self.tracker.async_set_last_edge(dt_util.now().date().isoformat())
+        await self.tracker.async_set_edge_run(None)
+        self._set_status("idle", f"edge clean stopped ({reason})")
+        _LOGGER.info("edge run cancelled (%s) — did %s, was on %s",
+                     reason, edge.get("done"), edge.get("current"))
+
+    async def _finish_edge_run(self, edge: dict, now: datetime) -> None:
+        # All rooms done → dock for good. (No settings to restore: the run doesn't
+        # change customized-cleaning / suction any more — it uses normal power.)
+        await self._svc("vacuum", "return_to_base", {"entity_id": self._vacuum_entity})
+        await self.tracker.async_set_last_edge(now.date().isoformat())
+        await self.tracker.async_set_edge_run(None)
+        self._set_status("idle", "edge clean finished")
+        if bool(self._opt(OPT_NOTIFY_STUCK, DEFAULT_NOTIFY_STUCK)):
+            await self._notify("🧭 Edge clean done",
+                               f"Ran the wall edges of {len(edge.get('done', []))} room(s).")
+        _LOGGER.info("edge run done: %s", edge.get("done"))
+
+    async def _apply_pending_edge_restore(self) -> None:
+        """Put back the settings an edge run changed (customized_cleaning back ON,
+        auto_recleaning to its old value) — but only once the robot has re-docked,
+        since those can't be set while it's busy/returning. Retries across ticks
+        until it lands, then clears the pending marker. Runs every tick regardless
+        of scheduler-enabled state so a half-finished edge run never strands it."""
+        pend = self.tracker.edge_restore
+        if not pend:
+            return
+        if (self._vacuum_state() or "") in ("cleaning", "returning"):
+            return                                     # still on its way home
+        st = self.hass.states.get(self._vacuum_entity)
+        if st and (st.attributes.get("washing") or st.attributes.get("drying")):
+            return                                     # busy at the dock — try next tick
+        ent = entity_of("switch", self._prefix, "customized_cleaning")
+        cur = self.hass.states.get(ent)
+        if cur is None or cur.state == "unavailable":
+            return                                     # switch not settable yet — retry
+        if pend.get("customized_cleaning") is not False and cur.state != "on":
+            await self._set_switch_safe(ent, True)
+            cur = self.hass.states.get(ent)
+            if not (cur and cur.state == "on"):
+                return                                 # didn't take — leave pending, retry
+        if pend.get("auto_recleaning"):
+            await self._set_select_safe(
+                entity_of("select", self._prefix, "auto_recleaning"), pend["auto_recleaning"])
+        await self.tracker.async_set_edge_restore(None)
+        _LOGGER.info("edge: settings restored after re-dock")
+
+    def _edge_schedule_due(self, now: datetime, now_min: int) -> bool:
+        """True when the dedicated edge schedule should fire now — enabled, its
+        every-N-days cadence is due, and it's at/after the configured time."""
+        if not bool(self._opt(OPT_EDGE_ENABLED, DEFAULT_EDGE_ENABLED)):
+            return False
+        every = int(self._opt(OPT_EDGE_EVERY_DAYS, DEFAULT_EDGE_EVERY_DAYS))
+        if not edge_due(self.tracker.last_edge, every, now.date()):
+            return False
+        return now_min >= clean_window.to_minutes(self._opt(OPT_EDGE_TIME, DEFAULT_EDGE_TIME))
+
+    async def async_edge_clean(self, segments=None) -> None:
+        """Manual entry point (service): edge-clean the given room segments, or
+        every enabled room if none given."""
+        if segments:
+            segs = [str(s) for s in segments]
+        else:
+            segs = all_enabled_segments(self._rooms())
+        async with self._eval_lock:
+            await self._start_edge_run(segs, manual=True)
+
+    def _is_cleaning_now(self) -> bool:
+        """The robot is actively cleaning again (progress resumed) — not merely
+        'returning' or 'paused'. Used to decide a held alert can be cancelled."""
+        if (self._vacuum_state() or "").lower() == "cleaning":
+            return True
+        status = (self._sval(entity_of("sensor", self._prefix, SUF_STATUS)) or "").lower()
+        task = (self._sval(entity_of("sensor", self._prefix, SUF_TASK_STATUS)) or "").lower()
+        return (any(w in task for w in _CLEANING_ACTIVE_WORDS)
+                or any(w in status for w in _CLEANING_ACTIVE_WORDS))
+
+    async def _queue_help(self, now: datetime, title: str, message: str, *,
+                          actions: list[dict] | None = None, image: str | None = None) -> None:
+        """Hold a 'needs help' alert for its recovery-grace window instead of
+        sending it now (see HELP_GRACE_SECONDS). _flush_help sends it if the robot
+        is still stuck when the window elapses, or drops it silently if it's
+        cleaning again by then. A later trip in the same window updates the CONTENT
+        (so 'recovering' → 'beached' shows the true final state) but keeps the
+        original timer, so a flapping error can't postpone the alert forever."""
+        at = self._pending_alert["at"] if self._pending_alert else now.isoformat()
+        first = self._pending_alert is None
+        self._pending_alert = {
+            "title": title, "message": message, "actions": actions, "image": image,
+            "at": at,
+        }
+        if first:
+            _LOGGER.info("held help alert (%ss grace): %s", HELP_GRACE_SECONDS, title)
+
+    async def _flush_help(self, now: datetime) -> None:
+        """Resolve a held 'needs help' alert: cancel it if the robot recovered
+        (cleaning again, no error), else send it once the grace window elapses."""
+        p = self._pending_alert
+        if not p:
+            return
+        if self._is_cleaning_now() and not self._error_active():
+            self._pending_alert = None
+            self._help_pending = False   # nothing was shown → no out-of-nowhere 'all clear'
+            _LOGGER.info("held help alert cancelled — robot recovered: %s", p["title"])
+            return
+        at = _parse_iso(p.get("at"))
+        if at is not None and (now - at).total_seconds() < HELP_GRACE_SECONDS:
+            return  # still within grace — give recovery a chance
+        self._pending_alert = None
+        await self._notify(p["title"], p["message"], high_priority=True,
+                           actions=p.get("actions"), image=p.get("image"))
+        _LOGGER.info("held help alert sent after grace: %s", p["title"])
 
     async def _maybe_all_clear(self, now: datetime) -> None:
         """After a 'needs help' alert, tell the user ONCE when the robot has
@@ -951,19 +1503,19 @@ class SchedulerEngine:
         self._help_pending = True
         where = self._sval(entity_of("sensor", self._prefix, "current_room")) or "somewhere"
         err = self._sval(entity_of("sensor", self._prefix, SUF_ERROR)) or "no error"
-        await self.tracker.async_log_stuck({
+        await self._log_stuck({
             "ts": now.isoformat(), "room": where, "x": pos[0], "y": pos[1],
             "error": f"no_progress ({err})", "kind": "any", "attempt": 0,
             "run_id": None, "beached": False,
         })
         if bool(self._opt(OPT_NOTIFY_STUCK, DEFAULT_NOTIFY_STUCK)):
             mins = int(stalled // 60)
-            await self._notify(
+            await self._queue_help(
+                now,
                 "🛟 Vacuum can't get home",
                 f"It's been near {where} for {mins} min moving about but not getting any "
                 "closer to the dock — it may be circling, repositioning, or nudged up "
                 "against something. Worth a look; it probably needs a hand.",
-                high_priority=True,
                 actions=self._rescue_actions(),
             )
         _LOGGER.info("no-progress: %ss near %s (dist=%s, err=%s)", int(stalled), where, dist, err)
@@ -1032,10 +1584,10 @@ class SchedulerEngine:
                         url = None
                         msg = (f"Something's been in its way near {where} {n} times, "
                                "so it can't get on with the clean. Worth a look.")
-                    await self._notify(
+                    await self._queue_help(
+                        now,
                         "⚠️ Vacuum blocked — here's what it saw",
                         msg,
-                        high_priority=True,
                         actions=self._rescue_actions(),
                         image=url,
                     )
@@ -1046,7 +1598,7 @@ class SchedulerEngine:
         run["errored"] = True
         await self.tracker.async_set_active_run(run)
         pos = self._vacuum_position()
-        await self.tracker.async_log_stuck({
+        await self._log_stuck({
             "ts": now.isoformat(), "room": where,
             "x": pos[0] if pos else None, "y": pos[1] if pos else None,
             "error": (self._sval(entity_of("sensor", self._prefix, SUF_ERROR)) or "blocked"),
@@ -1151,7 +1703,7 @@ class SchedulerEngine:
         # Telemetry for the learning engine: where it wedged + the error + attempt
         # number. Pure capped logging, no behaviour -- the recurring-trap learner
         # clusters these to decide when a spot has earned a permanent no-go.
-        await self.tracker.async_log_stuck({
+        await self._log_stuck({
             "ts": now.isoformat(),
             "room": where,
             "x": pos[0] if pos else None,
@@ -1203,10 +1755,10 @@ class SchedulerEngine:
             body = f"Got stuck near {where} — backing it out and letting it re-plan to carry on."
             if raw:
                 body += f"\n\nReported error: {raw}"
-            await self._notify(
+            await self._queue_help(
+                now,
                 "🛟 Vacuum recovering",
                 body,
-                high_priority=True,
                 actions=self._rescue_actions(),
             )
         _LOGGER.info("auto-recover: attempt %s near %s at %s (moved %s mm, error %s)",
@@ -1314,17 +1866,17 @@ class SchedulerEngine:
         self._help_pending = True   # tell them "all clear" if it makes it home
         where = self._sval(entity_of("sensor", self._prefix, "current_room")) or "somewhere"
         err = self._sval(entity_of("sensor", self._prefix, SUF_ERROR)) or "no error"
-        await self.tracker.async_log_stuck({
+        await self._log_stuck({
             "ts": now.isoformat(), "room": where, "x": pos[0], "y": pos[1],
             "error": f"stranded ({err})", "kind": "idle", "attempt": 0,
             "run_id": None, "beached": False,
         })
-        await self._notify(
+        await self._queue_help(
+            now,
             "⚠️ Vacuum stranded away from its dock",
             f"It's been sat near {where} for {int(stalled // 60)} min with no clean "
             f"running, and hasn't made it back to the dock (state: {state}, error: "
             f"{err}). It probably needs a hand.",
-            high_priority=True,
             actions=self._rescue_actions(),
         )
         _LOGGER.info("stranded near %s at %s for %ss (state=%s, error=%s)",
@@ -1368,7 +1920,7 @@ class SchedulerEngine:
         self._help_pending = True   # so the "all clear" fires when it's home again
         await self.tracker.async_set_active_run(run)
         where = self._sval(entity_of("sensor", self._prefix, "current_room")) or "somewhere"
-        await self.tracker.async_log_stuck({
+        await self._log_stuck({
             "ts": now.isoformat(), "room": where,
             "x": pos[0], "y": pos[1], "error": "no_progress",
             "kind": run.get("kind"), "attempt": 0,
@@ -1376,11 +1928,11 @@ class SchedulerEngine:
         })
         if bool(self._opt(OPT_NOTIFY_STUCK, DEFAULT_NOTIFY_STUCK)):
             mins = int(stalled // 60)
-            await self._notify(
+            await self._queue_help(
+                now,
                 "⚠️ Vacuum may be stuck",
                 f"It's sat near {where} for {mins} min without moving, but reported no "
                 "error. It may be wedged somewhere it can't drive out of — worth a look.",
-                high_priority=True,
                 actions=self._rescue_actions(),
             )
         _LOGGER.info("silent-stuck: no movement near %s for %ss", where, int(stalled))
@@ -1437,15 +1989,30 @@ class SchedulerEngine:
         return out
 
     def _presence_home(self) -> bool | None:
-        """True if anyone home, False if all away, None if undeterminable."""
+        """True if anyone home, False if all away, None if undeterminable.
+
+        A presence entity that hasn't reported for longer than
+        ``presence_stale_min`` (opt-in, 0 = off) is treated as STALE and ignored —
+        a wedged phone tracker stuck at 'home' would otherwise silently block
+        cleaning forever. If every entity is unavailable or stale, presence stays
+        None (undeterminable), which the away-gate treats as 'not away' (fail-safe)."""
         ents = self._presence_entities()
         if not ents:
             return None
+        stale_min = self._opt_int(OPT_PRESENCE_STALE_MIN, DEFAULT_PRESENCE_STALE_MIN)
+        now = dt_util.now()
         seen = []
         for ent in ents:
             st = self.hass.states.get(ent)
             if st is None or str(st.state).lower() in _UNAVAILABLE:
                 continue
+            if stale_min > 0:
+                last = getattr(st, "last_reported", None) or st.last_updated
+                age = (now - last).total_seconds() if last is not None else None
+                if tracker_stale(age, stale_min):
+                    _LOGGER.debug("presence: ignoring stale %s (no report for %.0f min)",
+                                  ent, (age or 0) / 60)
+                    continue
             seen.append(str(st.state).lower() in ("home", "on"))
         if not seen:
             return None
@@ -1467,6 +2034,49 @@ class SchedulerEngine:
             if ent and ent not in seen:
                 seen.append(ent)
         return seen
+
+    # A wedge at the EDGE of a room whose door is shut is a doorway-catch, not a
+    # permanent trap — the robot bumps the closed door from the adjoining room.
+    # We key it on POSITION + the room's map box (not on which room the sensor is
+    # assigned to), so it works whether the door sensor sits on that room or its
+    # neighbour. Fed into the stuck log as `door_closed` so the trap-learner never
+    # turns it into a no-go (which would wall the doorway shut for good).
+    _DOOR_EDGE_MM = 500
+
+    def _stuck_at_shut_door(self, x, y) -> bool:
+        try:
+            px, py = int(x), int(y)
+        except (TypeError, ValueError):
+            return False
+        for seg in self._rooms():
+            ds = self._door_state(seg)
+            if ds is None or str(ds).lower() not in ("off", "closed", "false"):
+                continue
+            box = self._room_box(seg)
+            if not box or len(box) < 4:
+                continue
+            rx0, ry0 = min(box[0], box[2]), min(box[1], box[3])
+            rx1, ry1 = max(box[0], box[2]), max(box[1], box[3])
+            m = self._DOOR_EDGE_MM
+            if (rx0 - m) <= px <= (rx1 + m) and (ry0 - m) <= py <= (ry1 + m):
+                return True
+        return False
+
+    async def _log_stuck(self, payload: dict) -> None:
+        """Log a stuck event, tagging whether it happened at a shut room's doorway
+        so the trap-learner can keep transient door-catches out of no-go suggestions."""
+        payload["door_closed"] = self._stuck_at_shut_door(payload.get("x"), payload.get("y"))
+        await self.tracker.async_log_stuck(payload)
+
+    def _room_boxes_by_name(self) -> dict:
+        """Each room's NAME -> its map bounding box, for clamping a learned no-go to
+        the room it's in (keyed by name to match the stuck event's `room` field)."""
+        out: dict = {}
+        for seg in self._rooms():
+            box = self._room_box(seg)
+            if box:
+                out[self._room_name(seg)] = box
+        return out
 
     def _room_name(self, seg) -> str:
         nm = self._sval(room_entity("select", self._prefix, seg, "name"))
@@ -1584,6 +2194,18 @@ class SchedulerEngine:
             await self._tick_once()
 
     async def _tick_once(self) -> None:
+        # Finish any deferred edge-settings restore FIRST — even when the scheduler is
+        # disabled — so a completed/interrupted edge run never leaves customized
+        # cleaning off (which would silently break normal per-room runs).
+        await self._apply_pending_edge_restore()
+
+        # Passively learn each room's real cleaned area (read-only) — feeds the edge
+        # cut's self-tuning. Runs regardless of enabled state; harmless if learning off.
+        try:
+            await self._observe_room_areas()
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug("room-area observe failed: %s", exc)
+
         if not self.tracker.enabled:
             self._set_status("disabled", "scheduler disabled")
             return
@@ -1606,6 +2228,14 @@ class SchedulerEngine:
 
         # 2) Presence grace bookkeeping.
         away_ok = await self._update_presence(now)
+
+        # 2a2) Resolve any held "needs help" alert BEFORE the all-clear: if the
+        # robot is cleaning again it's cancelled silently, else it's sent once the
+        # grace window elapses. Runs every tick, run in flight or not.
+        try:
+            await self._flush_help(now)
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning("held-alert flush failed: %s", exc)
 
         # 2b) Recovered and docked after a "needs help" alert? Send the all-clear
         # (runs every tick, whether or not a run is in flight).
@@ -1634,6 +2264,11 @@ class SchedulerEngine:
             await self._check_active_run(now, away_ok)
             return
 
+        # 3a) A dedicated edge clean in flight → drive it room-by-room.
+        if self.tracker.edge_run is not None:
+            await self._check_edge_run(now, away_ok)
+            return
+
         # No run in flight — but the robot may still be stranded out there from a
         # finished/interrupted one. Nothing else watches for that.
         try:
@@ -1648,6 +2283,14 @@ class SchedulerEngine:
         except Exception as exc:  # noqa: BLE001
             _LOGGER.warning("pre-run announce failed: %s", exc)
 
+        # 3a2) Extended-away "holiday": once the house is clean and everyone's been
+        #     gone a while, stop re-cleaning an already-clean empty house until they
+        #     return (or the weekly reset re-fills pending). Safe here — it only holds
+        #     when nothing is pending, so there's no half-done/suspended run to strand.
+        if self._holiday_hold(now):
+            self._set_status("idle", "holiday — house already clean, cleaning paused")
+            return
+
         # 3b) An interrupted run waiting for the house to empty again?
         if self.tracker.resume and bool(self._opt(OPT_RESUME_WHEN_AWAY, DEFAULT_RESUME_WHEN_AWAY)):
             if await self._try_resume(now, now_min, away_ok):
@@ -1657,6 +2300,11 @@ class SchedulerEngine:
         #     enough to retry (opt-in; may run while home if the user allowed it).
         if await self._maybe_door_retry(now, now_min, away_ok):
             return
+
+        # 3d) Dedicated edge clean due on its own cadence? Presence-gated like a run.
+        if self._edge_schedule_due(now, now_min) and away_ok:
+            if await self._start_edge_run(all_enabled_segments(self._rooms()), manual=False):
+                return
 
         # 4) Is a daily or catch-up dispatch due right now?
         decision = choose_dispatch(
@@ -1671,6 +2319,8 @@ class SchedulerEngine:
             catchup_day=self._opt_int(OPT_CATCHUP_DAY, DEFAULT_CATCHUP_DAY),
             catchup_time_min=clean_window.to_minutes(self._opt(OPT_CATCHUP_TIME, DEFAULT_CATCHUP_TIME)),
             catchup_dispatched_on=self.tracker.state.get("catchup_dispatched"),
+            slots_done=self.tracker.slots_done_today(today.isoformat()),
+            opportunistic_catchup=bool(self._opt(OPT_OPPORTUNISTIC_CATCHUP, DEFAULT_OPPORTUNISTIC_CATCHUP)),
         )
 
         if decision.action == "idle":
@@ -1691,6 +2341,24 @@ class SchedulerEngine:
         # 5) A dispatch is due — apply live gates (door / presence / window /
         #    battery / station) before actually sending the robot out.
         await self._attempt_dispatch(decision, now, now_min, away_ok)
+
+    def _holiday_hold(self, now: datetime) -> bool:
+        """True when extended-away 'holiday' should pause the scheduled clean:
+        enabled, everyone away, gone >= holiday_after_days, and the house is already
+        clean (nothing pending this week). See scheduler.holiday_hold for the rule."""
+        if not bool(self._opt(OPT_HOLIDAY_ENABLED, DEFAULT_HOLIDAY_ENABLED)):
+            return False
+        if self._presence_home() is not False:      # someone home, or presence unknown
+            return False
+        away = _parse_iso(self.tracker.away_since)
+        if away is None:
+            return False
+        house_clean = not pending_rooms(self._rooms(), self.tracker.cleaned)
+        return holiday_hold(
+            True, (now - away).days,
+            self._opt_int(OPT_HOLIDAY_AFTER_DAYS, DEFAULT_HOLIDAY_AFTER_DAYS),
+            house_clean,
+        )
 
     # --------------------------------------------------------- presence grace
     async def _update_presence(self, now: datetime) -> bool:
@@ -1757,13 +2425,17 @@ class SchedulerEngine:
                 await self._notify("Vacuum: rooms skipped", f"Door closed — skipped {names}. {tail}")
 
         if not reachable:
-            await self._mark_dispatched(decision.kind, today_iso)
+            await self._mark_dispatched(decision, today_iso)
             self._set_status("idle", "all due rooms unreachable (doors closed)")
             return
 
-        # d) All clear — go.
-        await self._dispatch_clean(reachable, decision.kind, now)
-        await self._mark_dispatched(decision.kind, today_iso)
+        # d) All clear — go. A per-room-times ("slot") dispatch forces sweep-only
+        #    on the slots the user tagged "vacuum only".
+        await self._dispatch_clean(
+            reachable, decision.kind, now,
+            sweep_only=set(decision.sweep_only) & set(reachable),
+        )
+        await self._mark_dispatched(decision, today_iso)
 
     def _start_gates_ok(self, now_min: int) -> tuple[bool, str]:
         """Window + battery + station preconditions for STARTING a clean.
@@ -1795,9 +2467,13 @@ class SchedulerEngine:
             return False, "station needs attention: " + ", ".join(reasons)
         return True, "ok"
 
-    async def _mark_dispatched(self, kind: str, today_iso: str) -> None:
-        if kind == "catchup":
+    async def _mark_dispatched(self, decision, today_iso: str) -> None:
+        if decision.kind == "catchup":
             await self.tracker.async_set_catchup_dispatched(today_iso)
+        elif decision.kind == "slot":
+            # Extra-times run: mark just the fired slot-keys, NOT the whole day —
+            # a room's later slots (and the global daily fire) must still run.
+            await self.tracker.async_mark_slots(today_iso, decision.slot_keys)
         else:
             await self.tracker.async_set_day_dispatched(today_iso)
 
@@ -1869,20 +2545,26 @@ class SchedulerEngine:
         options = list(st.attributes.get("options", [])) if st else []
         return next((m for m in SEQ_MOP_MODES if m in options), None)
 
-    async def _send_clean_segment(self, int_segments: list[int]) -> None:
+    async def _send_clean_segment(self, int_segments: list[int],
+                                  suction_level: int | None = None) -> None:
         """Start a segment clean, coping with the deep-'Sleeping' no-op: a robot
         in standby silently ignores clean_segment (seen live 2026-07-15), leaving
         the engine tracking a run that never began. Verify it actually started;
-        if not, wake it with vacuum.locate and re-send once."""
-        await self._svc(DREAME_DOMAIN, SERVICE_CLEAN_SEGMENT,
-                        {"entity_id": self._vacuum_entity, "segments": int_segments})
+        if not, wake it with vacuum.locate and re-send once.
+
+        ``suction_level`` (0-3) is baked into the service call — the edge run uses
+        it to force a QUIET pass regardless of each room's saved (often Turbo)
+        setting, WITHOUT touching the suction select, which the cloud 500s live."""
+        data = {"entity_id": self._vacuum_entity, "segments": int_segments}
+        if suction_level is not None:
+            data["suction_level"] = suction_level
+        await self._svc(DREAME_DOMAIN, SERVICE_CLEAN_SEGMENT, data)
         if await self._await_started(WAKE_VERIFY_SECONDS):
             return
         _LOGGER.info("clean_segment ignored (robot asleep?) — waking and retrying")
         await self._svc("vacuum", "locate", {"entity_id": self._vacuum_entity})
         await self._await_awake(WAKE_SETTLE_SECONDS)
-        await self._svc(DREAME_DOMAIN, SERVICE_CLEAN_SEGMENT,
-                        {"entity_id": self._vacuum_entity, "segments": int_segments})
+        await self._svc(DREAME_DOMAIN, SERVICE_CLEAN_SEGMENT, data)
         await self._await_started(WAKE_VERIFY_SECONDS)
 
     async def _resume_run(self, run: dict | None) -> None:
@@ -1922,11 +2604,14 @@ class SchedulerEngine:
             waited += WAKE_POLL_SECONDS
 
     async def _dispatch_clean(self, segments: list[str], kind: str, now: datetime,
-                              quiet: bool = False) -> None:
+                              quiet: bool = False, sweep_only=None) -> None:
         """Apply per-room settings (via customized cleaning) then start the
         segment clean. Every service call is best-effort so a model missing one
         of the optional per-room entities still cleans. ``quiet`` forces the
-        configured quiet suction on every room (for cleaning while home)."""
+        configured quiet suction on every room (for cleaning while home).
+        ``sweep_only`` is a set of segment-ids to clean sweep-only this run
+        regardless of their mop cadence (a per-room "vacuum only" extra pass)."""
+        sweep_only = set(sweep_only or ())
         seg_names = {str(s): self._room_name(s) for s in segments}
         quiet_suction = self._opt(OPT_QUIET_SUCTION, "")
 
@@ -1975,6 +2660,7 @@ class SchedulerEngine:
             rooms = self._rooms()
             default_mode = self._opt(OPT_DEFAULT_MODE, "")
             today_iso = now.date().isoformat()
+            applied: dict = {}   # seg -> resolved {mode, will_mop} for the run history
             for seg in segments:
                 cfg = rooms.get(seg, {})
                 base_mode = cfg.get(ROOM_MODE) or default_mode
@@ -1992,6 +2678,15 @@ class SchedulerEngine:
                     base_mode, mop_every, prev.get("count"), prev.get("date"), today_iso)
                 if is_mopping_mode(base_mode) and mop_every > 1:
                     await self.tracker.async_set_mop_counter(seg, count, today_iso)
+                # A per-room "vacuum only" extra-time slot forces sweep-only for
+                # this pass, whatever the cadence resolved (composes with never-mop).
+                if str(seg) in sweep_only:
+                    mode, will_mop = SWEEP_ONLY_MODE, False
+                # Remember what this room actually ran as (sweep vs mop), so the
+                # run history is auditable — "" means we deferred to the robot's
+                # native per-room mode. This is what makes never-mop / sweep-only
+                # verifiable after the fact (carpet safety).
+                applied[str(seg)] = {"mode": mode or "native", "will_mop": bool(will_mop)}
                 suction = (quiet_suction if quiet and quiet_suction
                            else (cfg.get(ROOM_SUCTION) or default_suction))
                 wetness = cfg.get(ROOM_WETNESS)
@@ -2004,6 +2699,11 @@ class SchedulerEngine:
                         "entity_id": room_entity("number", self._prefix, seg, "wetness_level"),
                         "value": wetness,
                     })
+            # Stash the resolved per-room modes on the active run for the history.
+            run = self.tracker.active_run
+            if isinstance(run, dict):
+                run["applied_modes"] = applied
+                await self.tracker.async_set_active_run(run)
 
         int_segments = [int(s) for s in segments if str(s).isdigit()]
         await self._send_clean_segment(int_segments)
@@ -2096,10 +2796,10 @@ class SchedulerEngine:
                     await self.tracker.async_set_active_run(run)
                     if bool(self._opt(OPT_NOTIFY_STUCK, DEFAULT_NOTIFY_STUCK)):
                         where = self._sval(entity_of("sensor", self._prefix, "current_room")) or "somewhere"
-                        await self._notify(
+                        await self._queue_help(
+                            now,
                             "⚠️ Vacuum needs help",
                             f"The robot errored near {where} while paused for someone being home.",
-                            high_priority=True,
                             actions=self._rescue_actions(),
                         )
             return
@@ -2240,10 +2940,10 @@ class SchedulerEngine:
                 changed = True
                 if bool(self._opt(OPT_NOTIFY_STUCK, DEFAULT_NOTIFY_STUCK)):
                     where = self._sval(entity_of("sensor", self._prefix, "current_room")) or "somewhere"
-                    await self._notify(
+                    await self._queue_help(
+                        now,
                         "⚠️ Vacuum needs help",
                         f"The robot reported an error near {where} during the {run['kind']} clean.",
-                        high_priority=True,
                         actions=self._rescue_actions(),
                     )
             if changed:
@@ -2457,10 +3157,17 @@ class SchedulerEngine:
         # deferred by "someone came home" never counts as a fail.
         cfg_rooms = self._rooms()
         default_mode = self._opt(OPT_DEFAULT_MODE, "")
+        applied_modes = run.get("applied_modes", {}) if isinstance(run, dict) else {}
         per_room: dict = {}
         for seg in cleaned:
-            per_room[seg] = {"status": "cleaned",
-                             "mode": cfg_rooms.get(seg, {}).get(ROOM_MODE) or default_mode or None}
+            am = applied_modes.get(str(seg), {})
+            # Prefer the mode actually applied this run (sweep vs mop); fall back to
+            # the configured base mode for older/edge dispatches without it recorded.
+            per_room[seg] = {
+                "status": "cleaned",
+                "mode": am.get("mode") or cfg_rooms.get(seg, {}).get(ROOM_MODE) or default_mode or None,
+                "will_mop": am.get("will_mop"),
+            }
         for seg in skipped:
             per_room[seg] = {"status": "failed" if failed_start else "skipped",
                              "reason": blocked_reasons.get(seg)}
@@ -2537,7 +3244,7 @@ class SchedulerEngine:
             _walls, zones, _mops = self._current_zones()
         except ZoneReadError:
             zones = []   # read-only here (dedup against existing zones); safe to skip
-        report = trap_learner.analyze(events, zones)
+        report = trap_learner.analyze(events, zones, room_boxes=self._room_boxes_by_name())
         suggested = self.tracker.learned_suggested
         promoted = self.tracker.learned_promoted
         for s in report["nogo_suggestions"]:
@@ -2980,7 +3687,7 @@ class SchedulerEngine:
                 # Never write a partial zone list — the service replaces them all.
                 _LOGGER.warning("apply_learned_nogo: aborting, zone read failed: %s", exc)
                 return {"applied": 0, "rooms": [], "error": "could not read existing zones"}
-            report = trap_learner.analyze(events, zones)
+            report = trap_learner.analyze(events, zones, room_boxes=self._room_boxes_by_name())
             promoted = self.tracker.learned_promoted
             todo = [s for s in report["nogo_suggestions"]
                     if s["key"] not in promoted and (key is None or s["key"] == key)]
@@ -3022,28 +3729,40 @@ class SchedulerEngine:
         return "no rooms scheduled today"
 
     def next_run(self, now: datetime) -> datetime | None:
-        """Next datetime the daily schedule fires: soonest upcoming day (today
-        included if its time hasn't passed) with any enabled room scheduled for
-        that weekday, at the configured daily time. Shared by the report + the
-        status snapshot so the GUI and the custom card agree."""
+        """Next datetime the schedule fires: soonest upcoming day (today included
+        if its time hasn't passed) with an enabled room due — at the global daily
+        time for rooms on the daily schedule, or at a room's own explicit slot
+        time for rooms with per-room ``times``. Shared by the report + the status
+        snapshot so the GUI and the custom card agree."""
         rooms_cfg = self._rooms()
         try:
             hh, mm = (int(x) for x in str(self._opt(OPT_DAILY_TIME, DEFAULT_DAILY_TIME)).split(":", 1))
         except (ValueError, AttributeError):
             hh, mm = 9, 0
+        daily_min = hh * 60 + mm
+        now_min = now.hour * 60 + now.minute
         for offset in range(0, 8):
             day = now + timedelta(days=offset)
             wd = day.weekday()
-            has = any(
+            cutoff = now_min if offset == 0 else None   # today: only future times
+            candidates: list[int] = []
+            # Global daily fire — only if some enabled room WITHOUT its own times
+            # is scheduled that weekday (slotted rooms run on their slots instead).
+            has_daily = any(
                 bool(c.get(ROOM_ENABLED)) and wd in (c.get(ROOM_DAYS) or [])
+                and not has_explicit_times(c)
                 for c in rooms_cfg.values() if isinstance(c, dict)
             )
-            if not has:
+            if has_daily and (cutoff is None or daily_min > cutoff):
+                candidates.append(daily_min)
+            # Per-room explicit slots scheduled that weekday.
+            slot_min = next_slot_minute(rooms_cfg, wd, after_min=cutoff)
+            if slot_min is not None:
+                candidates.append(slot_min)
+            if not candidates:
                 continue
-            run_at = day.replace(hour=hh, minute=mm, second=0, microsecond=0)
-            if offset == 0 and now >= run_at:
-                continue
-            return run_at
+            run_min = min(candidates)
+            return day.replace(hour=run_min // 60, minute=run_min % 60, second=0, microsecond=0)
         return None
 
     def robot_snapshot(self) -> dict:
@@ -3118,6 +3837,7 @@ class SchedulerEngine:
             "robot": self.robot_snapshot(),
             "presence_home": presence_home,
             "presence_configured": bool(self._presence_entities()),
+            "holiday": self._holiday_hold(now),   # extended-away pause is active
             "manual_clean": dict(self.tracker.manual_clean),   # rooms to clean by hand
             "next_run": nxt.isoformat() if nxt else None,
             "next_run_day": WEEKDAYS[nxt.weekday()] if nxt else None,

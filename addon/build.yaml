@@ -1,0 +1,9 @@
+build_from:
+  amd64: ghcr.io/home-assistant/amd64-base:3.21
+  aarch64: ghcr.io/home-assistant/aarch64-base:3.21
+  armv7: ghcr.io/home-assistant/armv7-base:3.21
+labels:
+  org.opencontainers.image.title: "Dreame Scheduler"
+  org.opencontainers.image.description: "Config GUI for the Dreame Scheduler HA integration"
+  org.opencontainers.image.source: "https://github.com/botts7/dreame-scheduler-addon"
+  org.opencontainers.image.licenses: "MIT"

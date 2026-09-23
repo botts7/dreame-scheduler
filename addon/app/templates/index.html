@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dreame Scheduler</title>
+  <link rel="stylesheet" href="static/style.css?v={{ ASSET_V }}">
+</head>
+<body>
+  <header>
+    <div>
+      <h1>🧹 Dreame Scheduler <span class="ver" title="Add-on version">v{{ ADDON_V }}</span></h1>
+      <div class="sub" id="subtitle">Loading…</div>
+    </div>
+    <span id="hdr-robot" class="hdr-robot" style="display:none" title="Robot right now"></span>
+    <button id="theme-toggle" class="theme-toggle" type="button" title="Theme" aria-label="Toggle theme"></button>
+  </header>
+
+  <nav id="nav">
+    <button id="nav-burger" class="nav-burger" type="button" aria-label="Menu" aria-expanded="false">☰</button>
+    <button data-tab="home" class="active">Home</button>
+    <button data-tab="general">General</button>
+    <button data-tab="presence">Presence &amp; notifications</button>
+    <button data-tab="rooms">Rooms</button>
+    <button data-tab="report">Report</button>
+    <button data-tab="dashboard">Add to HA</button>
+    <button data-tab="map">Map <span class="beta-tag">beta</span></button>
+  </nav>
+
+  <main>
+    <div id="load-banner" class="banner" style="display:none"></div>
+
+    <!-- HOME (reorderable card deck) -->
+    <section id="home" class="section active">
+      <div class="home-bar">
+        <div class="home-title" id="home-title">Overview</div>
+        <button id="deck-customize" class="btn ghost" type="button">⚙️ Customize</button>
+      </div>
+      <div id="card-deck" class="card-deck"><div class="hint">Loading…</div></div>
+    </section>
+
+    <!-- GENERAL -->
+    <section id="general" class="section">
+      <div class="card">
+        <h2>When it may run</h2>
+        <p class="hint">Restrict cleaning to a time window, and finish the current room if it runs over.</p>
+        <div class="field"><label>Restrict to a time window</label><span class="control" data-toggle="window_enabled"></span></div>
+        <div class="field"><label>Window start</label><span class="control"><input type="time" data-opt="window_start"></span></div>
+        <div class="field"><label>Window end</label><span class="control"><input type="time" data-opt="window_end"></span></div>
+        <div class="field"><label>Finish current room past window <span class="desc">overrun</span></label><span class="control" data-toggle="window_overrun"></span></div>
+        <div class="field"><label>Daily dispatch time</label><span class="control"><input type="time" data-opt="daily_time"></span></div>
+      </div>
+
+      <div class="card">
+        <h2>Guards</h2>
+        <p class="hint">Skip a run if the robot isn't in a fit state.</p>
+        <div class="field"><label>Minimum battery to start</label><span class="control"><input type="number" min="0" max="100" step="5" data-opt="min_battery"> %</span></div>
+        <div class="field"><label>Skip if dust bag full</label><span class="control" data-toggle="guard_dustbin"></span></div>
+        <div class="field"><label>Skip if water needs attention</label><span class="control" data-toggle="guard_water"></span></div>
+        <div class="field"><label>Auto-recover if it gets stuck <span class="desc">beta · walls off the spot, frees it, and carries on instead of docking</span></label><span class="control" data-toggle="auto_recover"></span></div>
+      </div>
+
+      <div class="card">
+        <h2>Someone comes home</h2>
+        <div class="field"><label>Return to dock on arrival</label><span class="control" data-toggle="return_on_arrival"></span></div>
+        <div class="field"><label>Resume remaining rooms once empty again</label><span class="control" data-toggle="resume_when_away"></span></div>
+        <div class="field"><label>Resume only the un-cleaned area <span class="desc">beta · continues where it left off instead of redoing rooms</span></label><span class="control" data-toggle="map_resume"></span></div>
+      </div>
+
+      <div class="card">
+        <h2>Weekly whole-house guarantee</h2>
+        <div class="field"><label>Guarantee whole house once a week</label><span class="control" data-toggle="catchup_enabled"></span></div>
+        <div class="field"><label>Catch-up day</label><span class="control"><select data-opt="catchup_day" data-weekdays></select></span></div>
+        <div class="field"><label>Catch-up time</label><span class="control"><input type="time" data-opt="catchup_time"></span></div>
+        <div class="field"><label>Catch up on any free (empty) day, not just the catch-up day</label><span class="control" data-toggle="opportunistic_catchup"></span></div>
+        <div class="field"><label>Pause cleaning on an extended absence (holiday)</label><span class="control" data-toggle="holiday_enabled"></span></div>
+        <div class="field"><label>Days away before pausing (house already clean)</label><span class="control"><input type="number" min="1" max="60" data-opt="holiday_after_days"></span></div>
+        <div class="field"><label>Week starts on</label><span class="control"><select data-opt="week_start_day" data-weekdays></select></span></div>
+      </div>
+
+      <div class="card">
+        <h2>🧭 Edge clean <span class="pill">beta</span></h2>
+        <p class="hint">Runs a <b>quiet lap along each room's real walls</b>, room by room — the robot's own wall-follow at Quiet suction (whatever each room's normal setting is), then it moves on once the walls are done rather than filling the whole room. Big furnished rooms take a while (it carefully traces every wall). Phase 1: it also runs the "invisible" room-boundary edges (open doorways / map splits), not only physical walls.</p>
+        <div class="field"><label>Edge clean on a schedule</label><span class="control" data-toggle="edge_enabled"></span></div>
+        <div class="field"><label>Every</label><span class="control"><input type="number" min="0" max="60" step="1" data-opt="edge_every_days"> days <span class="desc">0 = off</span></span></div>
+        <div class="field"><label>At</label><span class="control"><input type="time" data-opt="edge_time"></span></div>
+        <div class="field"><label>Passes</label><span class="control"><input type="number" min="1" max="3" step="1" data-opt="edge_passes"> <span class="desc">laps per room (loop the edges)</span></span></div>
+        <div class="field"><label>Self-tune from normal cleans</label><span class="control" data-toggle="edge_learn"></span> <span class="desc">learns each room's size so the edge cut adapts (beta)</span></div>
+        <div class="stack" style="margin-top:8px">
+          <button type="button" class="btn ghost" data-action="edge_clean">🧭 Edge clean now</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Cleaning defaults &amp; quiet mode</h2>
+        <p class="hint">Used when a room doesn't override. Modes/suction come from your vacuum.</p>
+        <div class="field"><label>Honor native per-room settings <span class="desc">respect the mode / mop / suction you set per room in the Dreame app (recommended) — so a room you set to sweep-only stays sweep-only</span></label><span class="control" data-toggle="honor_native"></span></div>
+        <div class="field"><label>Vacuum before mop <span class="desc">sweep the whole area, then mop — avoids smearing (overrides per-room modes; ignored while "Honor native per-room settings" is on)</span></label><span class="control" data-toggle="vacuum_before_mop"></span></div>
+        <div class="field"><label>Default cleaning mode</label><span class="control"><select data-opt="default_mode" data-modes></select></span></div>
+        <div class="field"><label>Default suction</label><span class="control"><select data-opt="default_suction" data-suctions></select></span></div>
+        <div class="field"><label>Quiet-mode suction</label><span class="control"><select data-opt="quiet_suction" data-suctions></select></span></div>
+      </div>
+
+      <div class="card">
+        <h2>Nudge me when overdue</h2>
+        <div class="field"><label>Nudge to clean while home if stale</label><span class="control" data-toggle="stale_nudge_enabled"></span></div>
+        <div class="field"><label>Nudge after this many days</label><span class="control"><input type="number" min="1" max="30" step="1" data-opt="stale_after_days"> days</span></div>
+      </div>
+
+      <div class="card">
+        <h2>Labs</h2>
+        <p class="hint">Experimental extras beyond day-to-day vacuum scheduling. Off keeps the Map tab focused on zones, walls and tap-to-clean.</p>
+        <div class="field"><label>Floor Plan Studio <span class="desc">room shapes, house outline, weld, 3D view, HA devices on the plan, export, plan upload</span></label><span class="control" data-toggle="studio_enabled"></span></div>
+      </div>
+    </section>
+
+    <!-- PRESENCE -->
+    <section id="presence" class="section">
+      <div class="card">
+        <h2>Presence</h2>
+        <p class="hint">Who counts as “home”. It only cleans when everyone here is away (plus a grace delay).</p>
+        <div class="field"><label>Only clean when no one is home</label><span class="control" data-toggle="require_away"></span></div>
+        <div class="stack">
+          <label>People / trackers that mean “home”</label>
+          <div class="picker" data-opt="presence_entities" data-entities="person,device_tracker,group"></div>
+        </div>
+        <div class="field"><label>Wait this long after everyone leaves</label><span class="control"><input type="number" min="0" max="120" step="1" data-opt="away_grace_min"> min</span></div>
+        <div class="field"><label>Ignore a tracker that hasn't reported for this long (0 = off)</label><span class="control"><input type="number" min="0" max="1440" step="5" data-opt="presence_stale_min"> min</span></div>
+      </div>
+      <div class="card">
+        <h2>Notifications</h2>
+        <div class="stack">
+          <label>Notification targets</label>
+          <div class="picker" data-opt="notify_targets" data-notify></div>
+        </div>
+        <div class="field"><label>Notify if the robot gets stuck</label><span class="control" data-toggle="notify_stuck"></span></div>
+        <div class="field"><label>Notify when rooms are skipped</label><span class="control" data-toggle="notify_skipped"></span></div>
+        <div class="field"><label>Weekly whole-house summary</label><span class="control" data-toggle="notify_weekly"></span></div>
+        <div class="field"><label>Alert when a wear-part runs low <span class="desc">filter, brushes, mop pad, sensors, detergent — with a one-tap reset once you've replaced it</span></label><span class="control" data-toggle="consumable_alert"></span></div>
+        <div class="field"><label>Wear-part alert threshold</label><span class="control"><input type="number" min="1" max="100" step="1" data-opt="consumable_threshold"> %</span></div>
+        <div class="stack" style="margin-top:8px">
+          <button type="button" class="btn ghost" id="test-notify-btn">Send test notification</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ROOMS -->
+    <section id="rooms" class="section">
+      <div class="card">
+        <h2>Per-room schedule</h2>
+        <p class="hint">Tick the days each room should be cleaned. Expand a room for mode, suction, mop wetness, passes, an optional door sensor (skips the room when the door is shut), and extra clean times (clean a room more than once a day, e.g. a midday vacuum-only pass of the kitchen).</p>
+        <div style="overflow-x:auto">
+          <table class="rooms-table" id="rooms-table"><thead></thead><tbody></tbody></table>
+        </div>
+      </div>
+    </section>
+
+    <!-- REPORT -->
+    <section id="report" class="section">
+      <div class="card">
+        <div class="report-head">
+          <div>
+            <h2>Cleaning report</h2>
+            <p class="hint" id="report-sub">What got cleaned this week, what was missed and why.</p>
+          </div>
+          <div class="seg-toggle" id="report-scope">
+            <button class="seg-btn active" data-scope="week" type="button">This week</button>
+            <button class="seg-btn" data-scope="today" type="button">Today</button>
+          </div>
+        </div>
+        <div id="report-summary" class="report-summary"></div>
+        <div id="report-rooms" class="report-rooms"><div class="hint">Loading…</div></div>
+      </div>
+
+      <div class="card" id="report-consumables-card" style="display:none">
+        <div class="report-head">
+          <div>
+            <h2>🧰 Maintenance <span class="pill">wear parts</span></h2>
+            <p class="hint">Life left in each part. After you replace one, tap <b>Reset</b> so the robot starts a fresh count.</p>
+          </div>
+        </div>
+        <div id="report-consumables" class="report-consumables"></div>
+      </div>
+
+      <div class="card" id="report-manual-card" style="display:none">
+        <div class="report-head">
+          <div>
+            <h2>🧹 Clean by hand</h2>
+            <p class="hint">Rooms the robot genuinely can't reach — so the house still gets clean. Tick one off when it's done, or send the robot to <b>show you the spot</b> (it drives there silently, no cleaning).</p>
+          </div>
+          <button class="btn ghost" id="manual-map-btn" type="button" title="Show these rooms shaded on your floor plan">🗺 Show on map</button>
+        </div>
+        <div id="report-manual" class="report-manual"></div>
+      </div>
+
+      <div class="card" id="report-suggestions-card" style="display:none">
+        <h2>💡 Suggestions</h2>
+        <p class="hint">Patterns from your cleaning history — act on them with a tap.</p>
+        <div id="report-suggestions" class="report-suggestions"></div>
+      </div>
+
+      <div class="card">
+        <h2>Coverage <span class="pill">robot map</span></h2>
+        <p class="hint">The robot's own render of where it actually swept — pick a run to see its passes.</p>
+        <div id="report-coverage" class="report-coverage"></div>
+      </div>
+
+      <div class="card">
+        <h2>Obstacles &amp; blocks <span class="pill">beta</span></h2>
+        <p class="hint">Spots the robot flagged — doorways it couldn't pass, thresholds, objects. Candidates for a no-go zone.</p>
+        <div id="report-obstacles" class="report-obstacles"></div>
+      </div>
+
+      <div class="card" id="report-history-card" style="display:none">
+        <h2>Run history <span class="pill">insights</span></h2>
+        <p class="hint">Every scheduled and manual run, room by room — with a weekday success trend.</p>
+        <div id="report-trend"></div>
+        <div id="report-history" class="ih-list"></div>
+      </div>
+    </section>
+
+    <!-- DASHBOARD -->
+    <section id="dashboard" class="section">
+      <div class="card">
+        <h2>Add to your HA dashboard</h2>
+        <p class="hint">Ready-to-paste Lovelace cards for your <b>own</b> Home Assistant dashboard — filled in with <i>this</i> scheduler's real entity IDs, so they work as-is. On a dashboard: <b>Edit → Add card → Manual</b>, paste, and Save. Copy the individual cards, or the whole view at the bottom.</p>
+        <div id="dash-cards"><div class="hint">Loading…</div></div>
+      </div>
+    </section>
+
+    <!-- MAP -->
+    <section id="map" class="section">
+      <div class="card">
+        <h2>Floor plan <span class="pill">beta</span></h2>
+        <p class="hint">Draw <b>virtual walls</b>, <b>no-go</b> and <b>no-mop</b> zones on your map, then write them to the robot (backs up the map first). Coordinates match the robot's map exactly.</p>
+        <div class="map-toolbar" id="map-toolbar" style="display:none">
+          <div class="tg"><span class="tg-l">Mode</span>
+            <button class="mtool active" data-mode="select" type="button" title="Select and edit shapes">⊹ Select</button>
+            <button class="mtool" data-mode="pan" type="button" title="Drag to pan the view">✋ Pan</button>
+          </div>
+          <div class="tg"><span class="tg-l">Draw</span>
+            <button class="mtool" data-mode="wall" type="button" title="Draw a virtual wall">▬ Wall</button>
+            <button class="mtool" data-mode="nogo" type="button" title="Draw a no-go zone">⛔ No-go</button>
+            <button class="mtool" data-mode="nomop" type="button" title="Draw a no-mop zone">💧 No-mop</button>
+          </div>
+          <div class="tg"><span class="tg-l">Refine</span>
+            <button class="mtool" data-mode="cut" type="button" title="Draw a box over out-window scans / artifacts to exclude them from the house outline">✂ Exclude</button>
+            <button class="mtool" data-mode="add" type="button" title="Draw a box over an unmapped gap to fill it into the house outline">➕ Include</button>
+            <button class="mtool" id="map-undo" type="button" title="Undo — Ctrl+Z" disabled>↶</button>
+            <button class="mtool" id="map-redo" type="button" title="Redo — Ctrl+Y" disabled>↷</button>
+          </div>
+          <div class="tg"><span class="tg-l">View</span>
+            <button class="mtool zbtn" id="zoom-out" type="button" title="Zoom out">－</button>
+            <button class="mtool zbtn" id="zoom-fit" type="button" title="Fit to screen">⤢</button>
+            <button class="mtool zbtn" id="zoom-in" type="button" title="Zoom in">＋</button>
+            <button class="mtool zbtn" id="map-rotate" type="button" title="Rotate the view 90° — edit in any orientation (labels stay upright)">⟳</button>
+            <button class="mtool zbtn" id="map-fs-btn" type="button" title="Full-screen editor (Esc to exit)">⛶</button>
+            <button class="mtool" id="map-img-toggle" type="button" title="Show the real map under the boxes">🖼 Map</button>
+            <button class="mtool" data-mode="imgalign" id="map-img-align" type="button" title="Drag to position the map image" style="display:none">✥ Align</button>
+          </div>
+          <div class="tg tg-assist"><span class="tg-l">Assist</span>
+            <button class="mtool active" id="map-snap" type="button" title="Snap room corners to neighbours &amp; mapped walls while reshaping. Turn off to leave gaps/overlaps.">🧲 Snap</button>
+            <button class="mtool" id="map-weld" type="button" title="One-tap tidy: align near-coincident walls across rooms + the outline, weld corners, close small gaps/crossovers">🪢 Weld</button>
+            <button class="mtool" id="map-autofit" type="button" title="Auto-fit every room to the mapped walls (non-overlapping), then refine by hand">🪄 Auto-fit</button>
+            <button class="mtool active" id="map-outline" type="button" title="Show the map re-rendered as a clean house outline to draw rooms onto">🏠 Outline</button>
+            <button class="mtool active" id="map-furniture" type="button" title="Show furniture the robot detected (beds, sofas, tables…)">🪑 Furniture</button>
+          </div>
+          <div class="tg"><span class="tg-l">Layers</span>
+            <button class="mtool" id="map-plan" type="button" title="Clean architectural floor-plan view">🏛 Plan</button>
+            <button class="mtool" id="map-plan-style" type="button" title="Switch plan style: blueprint / themed" style="display:none">◑ Style</button>
+            <button class="mtool" id="map-3d" type="button" title="Live 3D model — walls extruded from the plan, real device states, live robot position">🧊 3D</button>
+            <button class="mtool" id="map-devices" type="button" title="Place Home Assistant devices on the plan and control them">📟 Devices</button>
+            <button class="mtool" id="map-clean" type="button" title="Tap rooms to send the robot to clean them">🧹 Clean</button>
+          </div>
+          <span class="mt-spacer"></span>
+          <div class="tg tg-actions"><span class="tg-l">Output</span>
+            <button class="mtool" id="map-export" type="button" title="Export the plan as SVG + Lovelace YAML for your own dashboard">⬇ Export</button>
+            <button class="mtool" id="zones-write" type="button" title="Write walls and zones to the robot (backs up the map first)">⬆ Write to robot</button>
+            <button class="mtool" id="map-save" type="button" title="Save all map edits — shapes, boxes, underlay fit (same as the footer Save)">💾 Save</button>
+          </div>
+          <span id="zones-status" class="hint"></span>
+        </div>
+        <div class="map-img-strip" id="map-img-strip" style="display:none">
+          <label class="mis-op">Opacity <input type="range" id="mis-opacity" min="0" max="1" step="0.05"></label>
+          <span class="mt-sep"></span>
+          <span class="mis-lbl">Scale</span>
+          <button class="mtool zbtn" id="mis-scale-down" type="button" title="Smaller">－</button>
+          <button class="mtool zbtn" id="mis-scale-up" type="button" title="Bigger">＋</button>
+          <span class="mt-sep"></span>
+          <span class="mis-lbl">Rotate</span>
+          <button class="mtool zbtn" id="mis-rot-ccw" type="button" title="Rotate left">⟲</button>
+          <button class="mtool zbtn" id="mis-rot-cw" type="button" title="Rotate right">⟳</button>
+          <button class="mtool zbtn" id="mis-flip" type="button" title="Flip vertically">⇅</button>
+          <span class="mt-sep"></span>
+          <input type="file" id="mis-upload-file" accept="image/png,image/jpeg,image/webp" hidden>
+          <button class="btn ghost" id="mis-upload" type="button" title="Upload your real floor plan (the architect drawing) as a tracing baseline">📄 Upload plan</button>
+          <button class="btn ghost" id="mis-src" type="button" style="display:none">🤖 Robot map</button>
+          <span class="mt-spacer"></span>
+          <button class="btn ghost" id="mis-autofit" type="button" title="Position the map exactly using the vacuum's calibration">🎯 Auto-align</button>
+          <button class="btn ghost" id="mis-reset" type="button">↺ Reset fit</button>
+          <span class="hint">✥ Align mode: drag the map to reposition · saved with footer Save</span>
+        </div>
+        <div class="map-layout">
+          <div id="map-wrap"><div class="hint" id="map-status">Loading map…</div></div>
+          <aside class="map-side" id="map-side" style="display:none">
+            <div id="map-panel"></div>
+            <div class="side-h">Rooms <span class="side-links"><a href="#" id="room-filter-all">all</a> · <a href="#" id="room-filter-none">none</a></span></div>
+            <div id="room-list"></div>
+          </aside>
+          <aside class="map-side" id="device-side" style="display:none">
+            <div class="side-h">📟 Place a device</div>
+            <div class="hint" id="device-hint">Pick a device below, then click on the plan to place it. <b>Drag</b> a pin to move it · <b>tap</b> it to control · click it in the list to remove.</div>
+            <label class="dev-zoom-l">Zoom to <select id="device-zoom"></select></label>
+            <div id="device-filter" class="dev-filter"></div>
+            <input type="text" id="device-search" placeholder="Search devices / areas…" spellcheck="false">
+            <div id="device-list"></div>
+          </aside>
+        </div>
+        <div id="zones-list"></div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="actions">
+      <button class="btn ghost" data-action="run_scheduled_now">▶ Run today</button>
+      <button class="btn ghost" data-action="run_catchup_now">🧹 Clean pending</button>
+      <button class="btn ghost" data-action="run_catchup_now" data-quiet="1">🔉 Clean (quiet)</button>
+      <button class="btn ghost" data-action="reset_week">↺ Reset week</button>
+    </div>
+    <span id="status"></span>
+    <button class="btn primary" id="save">Save</button>
+  </footer>
+
+  <script src="static/geom.js?v={{ ASSET_V }}"></script>
+  <script src="static/ctxmenu.js?v={{ ASSET_V }}"></script>
+  <script src="static/app.js?v={{ ASSET_V }}"></script>
+  <script src="static/export.js?v={{ ASSET_V }}"></script>
+  <script src="static/insights.js?v={{ ASSET_V }}"></script>
+  <script src="static/plan3d.js?v={{ ASSET_V }}"></script>
+</body>
+</html>

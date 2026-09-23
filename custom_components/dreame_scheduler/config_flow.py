@@ -19,12 +19,21 @@ from .const import (
     CONF_PREFIX,
     CONF_VACUUM_ENTITY,
     DEFAULT_AWAY_GRACE_MIN,
+    DEFAULT_PRESENCE_STALE_MIN,
     DEFAULT_DOOR_RETRY_ENABLED,
     DEFAULT_DOOR_RETRY_MIN,
     DEFAULT_DOOR_RETRY_WHILE_HOME,
     DEFAULT_CATCHUP_DAY,
     DEFAULT_CATCHUP_ENABLED,
     DEFAULT_CATCHUP_TIME,
+    DEFAULT_OPPORTUNISTIC_CATCHUP,
+    DEFAULT_HOLIDAY_ENABLED,
+    DEFAULT_HOLIDAY_AFTER_DAYS,
+    DEFAULT_EDGE_ENABLED,
+    DEFAULT_EDGE_EVERY_DAYS,
+    DEFAULT_EDGE_TIME,
+    DEFAULT_EDGE_PASSES,
+    DEFAULT_EDGE_LEARN,
     DEFAULT_DAILY_TIME,
     DEFAULT_GUARD_DUSTBIN,
     DEFAULT_GUARD_WATER,
@@ -53,6 +62,14 @@ from .const import (
     OPT_CATCHUP_DAY,
     OPT_CATCHUP_ENABLED,
     OPT_CATCHUP_TIME,
+    OPT_OPPORTUNISTIC_CATCHUP,
+    OPT_HOLIDAY_ENABLED,
+    OPT_HOLIDAY_AFTER_DAYS,
+    OPT_EDGE_ENABLED,
+    OPT_EDGE_EVERY_DAYS,
+    OPT_EDGE_TIME,
+    OPT_EDGE_PASSES,
+    OPT_EDGE_LEARN,
     OPT_DAILY_TIME,
     OPT_DEFAULT_MODE,
     OPT_DEFAULT_SUCTION,
@@ -66,6 +83,7 @@ from .const import (
     OPT_CONSUMABLE_ALERT,
     OPT_CONSUMABLE_THRESHOLD,
     OPT_PRESENCE_ENTITIES,
+    OPT_PRESENCE_STALE_MIN,
     OPT_QUIET_SUCTION,
     OPT_REQUIRE_AWAY,
     OPT_RESUME_WHEN_AWAY,
@@ -85,10 +103,12 @@ from .const import (
     ROOM_MOP_EVERY,
     ROOM_REPEATS,
     ROOM_SUCTION,
+    ROOM_TIMES,
     ROOM_WETNESS,
     WEEKDAYS,
     room_entity,
 )
+from .scheduler import room_times as _norm_room_times
 
 _WEEKDAY_OPTIONS = [
     selector.SelectOptionDict(value=str(i), label=WEEKDAYS[i]) for i in range(7)
@@ -98,6 +118,14 @@ _WEEKDAY_OPTIONS = [
 def _prefix_from_entity(entity_id: str) -> str:
     """'vacuum.dreamebot_l20_ultra' -> 'dreamebot_l20_ultra'."""
     return entity_id.split(".", 1)[1] if "." in entity_id else entity_id
+
+
+def _int_or(value, default: int) -> int:
+    """int(value), preserving 0, falling back to default on None/blank/bad input."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 class DreameSchedulerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -148,6 +176,10 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
     def __init__(self) -> None:
         self._seg: str | None = None
+        # Carried between the room-edit step and the looped extra-times sub-step.
+        self._rooms_cfg: dict = {}
+        self._room_entry: dict = {}
+        self._room_times: list = []
 
     # -------- helpers --------
     @property
@@ -213,8 +245,19 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             vol.Optional(OPT_CATCHUP_DAY, default=str(self._opt(OPT_CATCHUP_DAY, DEFAULT_CATCHUP_DAY))): selector.SelectSelector(
                 selector.SelectSelectorConfig(options=_WEEKDAY_OPTIONS, mode=selector.SelectSelectorMode.DROPDOWN)),
             vol.Optional(OPT_CATCHUP_TIME, default=self._opt(OPT_CATCHUP_TIME, DEFAULT_CATCHUP_TIME)): selector.TimeSelector(),
+            vol.Optional(OPT_OPPORTUNISTIC_CATCHUP, default=self._opt(OPT_OPPORTUNISTIC_CATCHUP, DEFAULT_OPPORTUNISTIC_CATCHUP)): selector.BooleanSelector(),
+            vol.Optional(OPT_HOLIDAY_ENABLED, default=self._opt(OPT_HOLIDAY_ENABLED, DEFAULT_HOLIDAY_ENABLED)): selector.BooleanSelector(),
+            vol.Optional(OPT_HOLIDAY_AFTER_DAYS, default=self._opt(OPT_HOLIDAY_AFTER_DAYS, DEFAULT_HOLIDAY_AFTER_DAYS)): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=1, max=60, step=1, unit_of_measurement="days", mode=selector.NumberSelectorMode.BOX)),
             vol.Optional(OPT_WEEK_START_DAY, default=str(self._opt(OPT_WEEK_START_DAY, DEFAULT_WEEK_START_DAY))): selector.SelectSelector(
                 selector.SelectSelectorConfig(options=_WEEKDAY_OPTIONS, mode=selector.SelectSelectorMode.DROPDOWN)),
+            vol.Optional(OPT_EDGE_ENABLED, default=self._opt(OPT_EDGE_ENABLED, DEFAULT_EDGE_ENABLED)): selector.BooleanSelector(),
+            vol.Optional(OPT_EDGE_EVERY_DAYS, default=self._opt(OPT_EDGE_EVERY_DAYS, DEFAULT_EDGE_EVERY_DAYS)): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=0, max=60, step=1, unit_of_measurement="days", mode=selector.NumberSelectorMode.BOX)),
+            vol.Optional(OPT_EDGE_TIME, default=self._opt(OPT_EDGE_TIME, DEFAULT_EDGE_TIME)): selector.TimeSelector(),
+            vol.Optional(OPT_EDGE_PASSES, default=self._opt(OPT_EDGE_PASSES, DEFAULT_EDGE_PASSES)): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=1, max=3, step=1, unit_of_measurement="passes", mode=selector.NumberSelectorMode.BOX)),
+            vol.Optional(OPT_EDGE_LEARN, default=self._opt(OPT_EDGE_LEARN, DEFAULT_EDGE_LEARN)): selector.BooleanSelector(),
             vol.Optional(OPT_STALE_NUDGE_ENABLED, default=self._opt(OPT_STALE_NUDGE_ENABLED, DEFAULT_STALE_NUDGE_ENABLED)): selector.BooleanSelector(),
             vol.Optional(OPT_STALE_AFTER_DAYS, default=self._opt(OPT_STALE_AFTER_DAYS, DEFAULT_STALE_AFTER_DAYS)): selector.NumberSelector(
                 selector.NumberSelectorConfig(min=1, max=30, step=1, unit_of_measurement="days", mode=selector.NumberSelectorMode.BOX)),
@@ -229,6 +272,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         if user_input is not None:
             # NumberSelector returns floats; normalise to int.
             user_input[OPT_AWAY_GRACE_MIN] = int(user_input.get(OPT_AWAY_GRACE_MIN, DEFAULT_AWAY_GRACE_MIN))
+            user_input[OPT_PRESENCE_STALE_MIN] = int(user_input.get(OPT_PRESENCE_STALE_MIN, DEFAULT_PRESENCE_STALE_MIN))
             user_input[OPT_DOOR_RETRY_MIN] = int(user_input.get(OPT_DOOR_RETRY_MIN, DEFAULT_DOOR_RETRY_MIN))
             user_input[OPT_CONSUMABLE_THRESHOLD] = int(user_input.get(OPT_CONSUMABLE_THRESHOLD, DEFAULT_CONSUMABLE_THRESHOLD))
             return self._save(user_input)
@@ -246,6 +290,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     domain=["person", "device_tracker", "group", "binary_sensor"], multiple=True)),
             vol.Optional(OPT_AWAY_GRACE_MIN, default=self._opt(OPT_AWAY_GRACE_MIN, DEFAULT_AWAY_GRACE_MIN)): selector.NumberSelector(
                 selector.NumberSelectorConfig(min=0, max=120, step=1, unit_of_measurement="min", mode=selector.NumberSelectorMode.BOX)),
+            vol.Optional(OPT_PRESENCE_STALE_MIN, default=self._opt(OPT_PRESENCE_STALE_MIN, DEFAULT_PRESENCE_STALE_MIN)): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=0, max=1440, step=5, unit_of_measurement="min", mode=selector.NumberSelectorMode.BOX)),
             vol.Optional(OPT_DOOR_RETRY_ENABLED, default=self._opt(OPT_DOOR_RETRY_ENABLED, DEFAULT_DOOR_RETRY_ENABLED)): selector.BooleanSelector(),
             vol.Optional(OPT_DOOR_RETRY_MIN, default=self._opt(OPT_DOOR_RETRY_MIN, DEFAULT_DOOR_RETRY_MIN)): selector.NumberSelector(
                 selector.NumberSelectorConfig(min=1, max=180, step=1, unit_of_measurement="min", mode=selector.NumberSelectorMode.BOX)),
@@ -297,10 +343,19 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             wet = user_input.get(ROOM_WETNESS)
             if wet not in (None, ""):
                 entry[ROOM_WETNESS] = int(wet)
-            # Mop cadence: 1 = mop on every clean (off), 2 = every 2nd day, ...
-            entry[ROOM_MOP_EVERY] = int(user_input.get(ROOM_MOP_EVERY, 1) or 1)
-            rooms_cfg[seg] = entry
-            return self._save({OPT_ROOMS: rooms_cfg})
+            # Mop cadence: 0 = never mop (all-rug room), 1 = mop every clean,
+            # 2 = every 2nd day, ... (allow 0 through, don't coerce it to 1).
+            try:
+                entry[ROOM_MOP_EVERY] = max(0, int(user_input.get(ROOM_MOP_EVERY, 1)))
+            except (TypeError, ValueError):
+                entry[ROOM_MOP_EVERY] = 1
+            # Extra clean times (multiple cleans per day) are edited in the next
+            # step (a time picker you add one at a time). Carry the room's current
+            # times in, and stash the half-built entry for that step to finish.
+            self._rooms_cfg = rooms_cfg
+            self._room_entry = entry
+            self._room_times = list(cur.get(ROOM_TIMES) or [])
+            return await self.async_step_room_times()
 
         modes = self._select_options("cleaning_mode")
         suctions = self._select_options("suction_level")
@@ -308,6 +363,20 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             options=[""] + modes, custom_value=True, mode=selector.SelectSelectorMode.DROPDOWN))
         suction_sel = selector.SelectSelector(selector.SelectSelectorConfig(
             options=[""] + suctions, custom_value=True, mode=selector.SelectSelectorMode.DROPDOWN))
+        # Mop cadence as a labelled dropdown so "Never" (0) reads clearly for an
+        # all-rug room, alongside "every clean" (1) and the every-Nth options.
+        mop_every_sel = selector.SelectSelector(selector.SelectSelectorConfig(
+            options=[
+                {"value": "0", "label": "Never — sweep only (all-rug room)"},
+                {"value": "1", "label": "Every clean"},
+                {"value": "2", "label": "Every 2nd clean"},
+                {"value": "3", "label": "Every 3rd clean"},
+                {"value": "4", "label": "Every 4th clean"},
+                {"value": "5", "label": "Every 5th clean"},
+                {"value": "6", "label": "Every 6th clean"},
+                {"value": "7", "label": "Every 7th clean"},
+            ],
+            mode=selector.SelectSelectorMode.DROPDOWN))
 
         fields: dict = {
             vol.Optional(ROOM_ENABLED, default=cur.get(ROOM_ENABLED, True)): selector.BooleanSelector(),
@@ -317,8 +386,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             vol.Optional(ROOM_MODE, default=cur.get(ROOM_MODE, "")): mode_sel,
             vol.Optional(ROOM_SUCTION, default=cur.get(ROOM_SUCTION, "")): suction_sel,
             vol.Optional(ROOM_WETNESS, default=str(cur.get(ROOM_WETNESS, "") or "")): selector.TextSelector(),
-            vol.Optional(ROOM_MOP_EVERY, default=int(cur.get(ROOM_MOP_EVERY, 1) or 1)): selector.NumberSelector(
-                selector.NumberSelectorConfig(min=1, max=7, step=1, mode=selector.NumberSelectorMode.BOX)),
+            vol.Optional(ROOM_MOP_EVERY, default=str(_int_or(cur.get(ROOM_MOP_EVERY), 1))): mop_every_sel,
             vol.Optional(ROOM_REPEATS, default=cur.get(ROOM_REPEATS, 1)): selector.NumberSelector(
                 selector.NumberSelectorConfig(min=1, max=3, step=1, mode=selector.NumberSelectorMode.BOX)),
         }
@@ -332,4 +400,60 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         return self.async_show_form(
             step_id="room_edit", data_schema=schema,
             description_placeholders={"room": self._discover_rooms().get(seg, seg)},
+        )
+
+    # -------- rooms: edit the extra clean times (add one at a time) --------
+    def _times_labels(self) -> list[dict]:
+        """Current times as {value, label} for the remove picker — normalised
+        (sorted, de-duped) so it matches what the scheduler will actually use."""
+        return [
+            {"value": at, "label": at + ("" if mop else " (vacuum only)")}
+            for _m, at, mop in _norm_room_times({"times": self._room_times})
+        ]
+
+    async def async_step_room_times(self, user_input=None):
+        """Looping sub-step: pick a time, optionally mark it vacuum-only, add it,
+        and repeat until 'Save and finish'. Existing times can be removed. Empty =
+        the room just uses the global daily time (today's behaviour)."""
+        if user_input is not None:
+            times = list(self._room_times)
+            remove = set(user_input.get("remove", []) or [])
+            if remove:
+                times = [t for t in times if t.get("at") not in remove]
+            add_t = user_input.get("add_time")
+            if add_t:
+                at = str(add_t)[:5]                       # TimeSelector gives HH:MM:SS
+                mop = not bool(user_input.get("add_vac", False))
+                times = [t for t in times if t.get("at") != at]
+                times.append({"at": at, "mop": mop})
+            # Normalise through the same helper the engine uses (sort/dedup/validate).
+            self._room_times = [
+                {"at": at, "mop": mop} for _m, at, mop in _norm_room_times({"times": times})
+            ]
+            if user_input.get("finish", True):
+                entry = dict(self._room_entry)
+                if self._room_times:
+                    entry[ROOM_TIMES] = self._room_times
+                else:
+                    entry.pop(ROOM_TIMES, None)
+                self._rooms_cfg[self._seg] = entry
+                return self._save({OPT_ROOMS: self._rooms_cfg})
+            return await self.async_step_room_times()      # loop to add another
+
+        remove_opts = self._times_labels()
+        fields: dict = {}
+        if remove_opts:
+            fields[vol.Optional("remove", default=[])] = selector.SelectSelector(
+                selector.SelectSelectorConfig(options=remove_opts, multiple=True,
+                                              mode=selector.SelectSelectorMode.LIST))
+        fields[vol.Optional("add_time")] = selector.TimeSelector()
+        fields[vol.Optional("add_vac", default=False)] = selector.BooleanSelector()
+        fields[vol.Optional("finish", default=True)] = selector.BooleanSelector()
+        current = ", ".join(o["label"] for o in remove_opts) or "none yet"
+        return self.async_show_form(
+            step_id="room_times", data_schema=vol.Schema(fields),
+            description_placeholders={
+                "room": self._discover_rooms().get(self._seg, self._seg),
+                "current": current,
+            },
         )

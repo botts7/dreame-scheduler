@@ -54,6 +54,15 @@ async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> Non
     await hass.config_entries.async_reload(entry.entry_id)
 
 
+# Every domain-wide service registered across this integration (see the register
+# helpers below + config_bridge/report). Torn down when the last entry is removed
+# so they don't linger in the service picker after uninstall.
+_DOMAIN_SERVICES = (
+    "run_scheduled_now", "run_catchup_now", "reset_week", "clean_rooms", "edge_clean",
+    "apply_learned_nogo", "get_config", "set_config", "get_report",
+)
+
+
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator: SchedulerCoordinator = hass.data.get(DOMAIN, {}).get(entry.entry_id)
     if coordinator is not None:
@@ -61,13 +70,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
         hass.data[DOMAIN].pop(entry.entry_id, None)
-        # Services are registered once for the whole domain (not per-entry). When
-        # the last entry is gone, remove them all so none linger in the service
-        # picker after uninstall. Enumerated from the registry so the set can't
-        # drift out of sync with what was registered.
+        # Services are registered once for the whole domain (not per-entry); drop them
+        # only when the final entry is gone, else the picker keeps dead services.
         if not hass.data.get(DOMAIN):
-            for service in list(hass.services.async_services().get(DOMAIN, {})):
-                hass.services.async_remove(DOMAIN, service)
+            for svc in _DOMAIN_SERVICES:
+                if hass.services.has_service(DOMAIN, svc):
+                    hass.services.async_remove(DOMAIN, svc)
     return unloaded
 
 
@@ -104,6 +112,11 @@ def _async_register_services(hass: HomeAssistant) -> None:
         for eng in _engines(call):
             await eng.async_clean_rooms(segs, quiet=bool(call.data.get("quiet", False)))
 
+    async def _edge_clean(call: ServiceCall) -> None:
+        segs = call.data.get("segments")
+        for eng in _engines(call):
+            await eng.async_edge_clean(segs)
+
     async def _apply_learned_nogo(call: ServiceCall) -> dict:
         key = call.data.get("key")
         results = []
@@ -127,6 +140,9 @@ def _async_register_services(hass: HomeAssistant) -> None:
     hass.services.async_register(DOMAIN, "clean_rooms", _clean_rooms, schema=vol.Schema({
         vol.Required("segments"): list, vol.Optional("quiet", default=False): cv.boolean,
         vol.Optional("vacuum"): cv.string,
+    }))
+    hass.services.async_register(DOMAIN, "edge_clean", _edge_clean, schema=vol.Schema({
+        vol.Optional("segments"): list, vol.Optional("vacuum"): cv.string,
     }))
     hass.services.async_register(
         DOMAIN, "apply_learned_nogo", _apply_learned_nogo,

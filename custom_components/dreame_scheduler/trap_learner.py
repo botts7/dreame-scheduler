@@ -51,6 +51,12 @@ MIN_DISTINCT_RUNS = 3
 # least this many of them, so we never wall a spot the robot only ever stopped
 # *near*. Two separate physical catches is the evidence that it's a real trap.
 MIN_PHYSICAL_RUNS = 2
+# ...AND those physical catches must be a meaningful FRACTION of the visits, not
+# just twice out of dozens. A spot the robot routes past most of the time and only
+# occasionally rides up on (a doorway threshold, a closed door with no sensor) is a
+# path block, not a wall-it-off trap — walling it would block the doorway for good.
+# 25%: a real trap catches the robot much more often than that; a doorway far less.
+MIN_PHYSICAL_FRACTION = 0.25
 # Padding around a cluster's spread for the proposed box. ~a robot radius, so the
 # box covers the physical lip/edge the robot's CENTRE stops short of, not just
 # the logged centre points.
@@ -126,15 +132,36 @@ def _cluster(events: list) -> list:
     return clusters
 
 
-def _box(events: list, cx: float, cy: float) -> list:
-    """Padded, clamped [x0, y0, x1, y1] around the events' spread."""
+def _box(events: list, cx: float, cy: float, room_box: list | None = None) -> list:
+    """Padded [x0, y0, x1, y1] around the events' spread, CLIPPED to the room's own
+    map rectangle when known — so a wedge at a doorway can't bleed the no-go into
+    the neighbouring room."""
     xs = [v for v in (_num(e.get("x")) for e in events) if v is not None]
     ys = [v for v in (_num(e.get("y")) for e in events) if v is not None]
     spread_x = (max(xs) - min(xs)) / 2 if xs else 0
     spread_y = (max(ys) - min(ys)) / 2 if ys else 0
     hx = max(MIN_BOX_HALF_MM, min(MAX_BOX_HALF_MM, spread_x + BOX_PAD_MM))
     hy = max(MIN_BOX_HALF_MM, min(MAX_BOX_HALF_MM, spread_y + BOX_PAD_MM))
-    return [int(cx - hx), int(cy - hy), int(cx + hx), int(cy + hy)]
+    x0, y0, x1, y1 = cx - hx, cy - hy, cx + hx, cy + hy
+    if room_box and len(room_box) >= 4:
+        rx0, ry0 = min(room_box[0], room_box[2]), min(room_box[1], room_box[3])
+        rx1, ry1 = max(room_box[0], room_box[2]), max(room_box[1], room_box[3])
+        cx0, cy0, cx1, cy1 = max(x0, rx0), max(y0, ry0), min(x1, rx1), min(y1, ry1)
+        if cx1 > cx0 and cy1 > cy0:      # keep it valid; ignore a degenerate clip
+            x0, y0, x1, y1 = cx0, cy0, cx1, cy1
+    return [int(x0), int(y0), int(x1), int(y1)]
+
+
+def _doorway_cluster(events: list) -> bool:
+    """True when a cluster's PHYSICAL wedges happened mostly with the room's door
+    shut — i.e. it's a doorway the robot catches on a closed door, not a permanent
+    obstacle. A transient block, so it must never become a no-go (which would wall
+    off the doorway for good). The engine tags each stuck event with door_closed."""
+    phys = [e for e in events if _is_physical(e)]
+    if not phys:
+        return False
+    shut = sum(1 for e in phys if e.get("door_closed"))
+    return shut >= (len(phys) + 1) // 2      # a majority (ties count as doorway)
 
 
 def _covered(cx: float, cy: float, zones) -> bool:
@@ -159,6 +186,7 @@ def _error_counts(events: list) -> dict:
 
 
 def analyze(stuck_events: list, existing_zones: list | None = None, *,
+            room_boxes: dict | None = None,
             min_runs: int = MIN_DISTINCT_RUNS,
             min_physical_runs: int = MIN_PHYSICAL_RUNS) -> dict:
     """Cluster the stuck-event log and split it into actionable buckets::
@@ -183,13 +211,16 @@ def analyze(stuck_events: list, existing_zones: list | None = None, *,
 
     nogo_suggestions: list = []
     path_blocks: list = []
+    door_blocks: list = []
     clusters_out: list = []
     mobile_events = 0
 
     for room, evs in by_room.items():
+        room_box = (room_boxes or {}).get(room)
         for c in _cluster(evs):
             cev = c["events"]
             phys = [e for e in cev if _is_physical(e)]
+            doorway = _doorway_cluster(cev)
             cx, cy = c["cx"], c["cy"]
             # Centre + box on the PHYSICAL points when we have them — those are
             # the real hazard; the path/no-progress points are where it drifted.
@@ -209,7 +240,8 @@ def analyze(stuck_events: list, existing_zones: list | None = None, *,
                 "events": len(cev),
                 "beached": any(bool(e.get("beached")) for e in cev),
                 "covered": _covered(acx, acy, existing_zones),
-                "box": _box(anchor, acx, acy),
+                "doorway": doorway,
+                "box": _box(anchor, acx, acy, room_box),
                 "errors": _error_counts(cev),
                 "points": [{"x": int(_num(e.get("x"))), "y": int(_num(e.get("y"))),
                             "error": e.get("error"), "beached": bool(e.get("beached")),
@@ -219,14 +251,24 @@ def analyze(stuck_events: list, existing_zones: list | None = None, *,
             clusters_out.append(info)
             if info["covered"]:
                 continue
-            # A no-go is earned only when the spot RECURS across runs AND
-            # PHYSICALLY caught the robot on more than one of them.
-            if phys_runs >= min_physical_runs and total_runs >= min_runs:
+            # A doorway the robot catches on a SHUT door is transient — walling it
+            # would block the doorway for good, and the box would bleed into the
+            # next room. Surface it as advice, never a no-go, however often it recurs.
+            if doorway:
+                if phys_runs >= min_physical_runs and total_runs >= min_runs:
+                    door_blocks.append(info)
+                continue
+            # A no-go is earned only when the spot RECURS, PHYSICALLY caught the
+            # robot on more than one run, AND did so on a meaningful fraction of
+            # visits — else it's a doorway/route-block it mostly gets past.
+            phys_frac = phys_runs / max(total_runs, 1)
+            if (phys_runs >= min_physical_runs and total_runs >= min_runs
+                    and phys_frac >= MIN_PHYSICAL_FRACTION):
                 nogo_suggestions.append(info)
-            elif phys_runs == 0 and total_runs >= min_runs:
-                # Recurs, but the robot only ever stopped NEAR it (path blocks).
-                # An unmapped obstacle — a virtual-wall / furniture job, never a
-                # no-go on the (open-floor) stop points.
+            elif total_runs >= min_runs and (phys_runs == 0 or phys_runs >= min_physical_runs):
+                # Recurs but the robot mostly just routes past it (only stopped
+                # near it, or rode up on it a handful of times among many visits) —
+                # an unmapped obstacle / doorway. Advice, never a no-go on open floor.
                 path_blocks.append(info)
             elif info["beached"] and phys_runs < min_physical_runs:
                 # One-off / scattered lift — a mobile object a no-go can't fix.
@@ -243,9 +285,11 @@ def analyze(stuck_events: list, existing_zones: list | None = None, *,
             "before a run prevents these — a no-go can't, since the object moves."
         ),
     }
+    door_blocks.sort(key=lambda s: s["runs"], reverse=True)
     return {
         "nogo_suggestions": nogo_suggestions,
         "path_blocks": path_blocks,
+        "door_blocks": door_blocks,
         "clusters": clusters_out,
         "tidy_advice": tidy_advice,
     }

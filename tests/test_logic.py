@@ -23,6 +23,7 @@ cg = load("clean_guards")
 sc = load("scheduler")
 ha = load("history_analytics")
 co = load("consumables")
+tl = load("trap_learner")
 
 fails = []
 
@@ -118,6 +119,80 @@ d7 = sc.choose_dispatch(now_date=date(2026, 7, 21), weekday=1, now_min=610, room
                         catchup_time_min=600, catchup_dispatched_on=None)
 check("every-day room cleans again next day", d7.action == "dispatch" and d7.segments == ["1"])
 
+# ---- per-room explicit times (multiple cleans per day) ----
+kt = {"4": {"enabled": True, "days": [0, 1, 2, 3, 4, 5, 6],
+            "times": [{"at": "13:00", "mop": False}, {"at": "08:00"}]}}
+rt = sc.room_times(kt["4"])
+check("room_times sorts + defaults mop True", rt == [(480, "08:00", True), (780, "13:00", False)])
+check("room_times empty when absent", sc.room_times({"enabled": True}) == [])
+check("room_times skips malformed", sc.room_times({"times": [{"at": "9999"}, {"nope": 1}, {"at": "07:15"}]}) == [(435, "07:15", True)])
+check("has_explicit_times true", sc.has_explicit_times(kt["4"]) is True)
+check("has_explicit_times false", sc.has_explicit_times({"days": [0]}) is False)
+# due_slots: at 13:20 both slots are due; at 08:20 only the 08:00 one.
+ds_all = sc.due_slots(kt, weekday=0, now_min=800, slots_done=set())
+check("due_slots both due at 13:20", ds_all == [("4", "4@08:00", True), ("4", "4@13:00", False)])
+ds_early = sc.due_slots(kt, weekday=0, now_min=500, slots_done=set())
+check("due_slots only 08:00 due at 08:20", ds_early == [("4", "4@08:00", True)])
+ds_after = sc.due_slots(kt, weekday=0, now_min=800, slots_done={"4@08:00"})
+check("due_slots skips a fired slot", ds_after == [("4", "4@13:00", False)])
+check("due_slots respects days (not scheduled)", sc.due_slots({"4": {"enabled": True, "days": [2], "times": [{"at": "08:00"}]}}, weekday=0, now_min=800, slots_done=set()) == [])
+check("next_slot_minute first of day", sc.next_slot_minute(kt, weekday=0) == 480)
+check("next_slot_minute after 08:00 -> 13:00", sc.next_slot_minute(kt, weekday=0, after_min=480) == 780)
+# choose_dispatch: the 13:00 sweep-only slot fires as a "slot" dispatch.
+sd = sc.choose_dispatch(now_date=date(2026, 7, 6), weekday=0, now_min=780, rooms=kt, cleaned={"4": "2026-07-06T08:05:00+10:00"},
+                        daily_time_min=600, day_dispatched_on=None, catchup_enabled=False, catchup_day=5,
+                        catchup_time_min=None, catchup_dispatched_on=None, slots_done={"4@08:00"})
+check("slot dispatch fires despite cleaned-today", sd.action == "dispatch" and sd.kind == "slot" and sd.segments == ["4"])
+check("slot dispatch marks sweep-only + slot key", sd.sweep_only == ["4"] and sd.slot_keys == ["4@13:00"])
+# A slotted room is excluded from the global daily fire (it runs on its own times).
+sd2 = sc.choose_dispatch(now_date=date(2026, 7, 6), weekday=0, now_min=610, rooms=kt, cleaned=set(),
+                         daily_time_min=600, day_dispatched_on=None, catchup_enabled=False, catchup_day=5,
+                         catchup_time_min=None, catchup_dispatched_on=None, slots_done={"4@08:00"})
+check("slotted room not in daily fire", sd2.kind != "daily" or "4" not in sd2.segments)
+# Same room, two slots pending on one tick -> one dispatch, mop wins, both keys marked.
+kt2 = {"4": {"enabled": True, "days": [0], "times": [{"at": "08:00", "mop": True}, {"at": "13:00", "mop": False}]}}
+sd3 = sc.choose_dispatch(now_date=date(2026, 7, 6), weekday=0, now_min=800, rooms=kt2, cleaned=set(),
+                         daily_time_min=None, day_dispatched_on=None, catchup_enabled=False, catchup_day=5,
+                         catchup_time_min=None, catchup_dispatched_on=None, slots_done=set())
+check("two pending slots -> single seg, mop wins", sd3.segments == ["4"] and sd3.sweep_only == [] and sorted(sd3.slot_keys) == ["4@08:00", "4@13:00"])
+
+# ---- opportunistic (rolling) catch-up ----
+# Rooms scheduled Mon only; "today" is Wed (weekday 2), catch-up day is Sat (5).
+oc = {"1": {"enabled": True, "days": [0]}, "2": {"enabled": True, "days": [0]}}
+oc_kw = dict(now_date=date(2026, 7, 8), weekday=2, now_min=610, rooms=oc, cleaned=set(),
+             daily_time_min=None, day_dispatched_on=None, catchup_enabled=True, catchup_day=5,
+             catchup_time_min=600, catchup_dispatched_on=None)
+o1 = sc.choose_dispatch(**oc_kw)
+check("opportunistic OFF: no catch-up off-day", o1.action == "idle")
+o2 = sc.choose_dispatch(**{**oc_kw, "opportunistic_catchup": True})
+check("opportunistic ON: catch-up any empty day", o2.action == "dispatch" and o2.kind == "catchup" and o2.segments == ["1", "2"])
+o3 = sc.choose_dispatch(**{**oc_kw, "opportunistic_catchup": True, "now_min": 590})
+check("opportunistic ON: waits for catch-up time", o3.action == "idle")
+o4 = sc.choose_dispatch(**{**oc_kw, "opportunistic_catchup": True, "cleaned": {"1": "x", "2": "x"}})
+check("opportunistic ON: nothing pending -> idle", o4.action == "idle" and o4.reason == "week_already_complete")
+o5 = sc.choose_dispatch(**{**oc_kw, "opportunistic_catchup": True, "catchup_dispatched_on": "2026-07-08"})
+check("opportunistic ON: once per day", o5.action == "idle")
+# Daily still wins over opportunistic catch-up on the same tick.
+oc_daily = {"1": {"enabled": True, "days": [2]}}   # scheduled Wed
+o6 = sc.choose_dispatch(now_date=date(2026, 7, 8), weekday=2, now_min=610, rooms=oc_daily, cleaned=set(),
+                        daily_time_min=600, day_dispatched_on=None, catchup_enabled=True, catchup_day=5,
+                        catchup_time_min=600, catchup_dispatched_on=None, opportunistic_catchup=True)
+check("daily wins over opportunistic on same tick", o6.action == "dispatch" and o6.kind == "daily")
+
+# ---- holiday / extended-away pause ----
+check("holiday off -> no hold", sc.holiday_hold(False, 10, 3, True) is False)
+check("holiday: away >= N days + clean -> hold", sc.holiday_hold(True, 3, 3, True) is True)
+check("holiday: away < N days -> no hold", sc.holiday_hold(True, 2, 3, True) is False)
+check("holiday: house not clean -> no hold (first clean still runs)", sc.holiday_hold(True, 5, 3, False) is False)
+check("holiday: presence unknown (away_days None) -> no hold", sc.holiday_hold(True, None, 3, True) is False)
+
+# ---- stale presence-tracker watchdog ----
+check("stale off (0) -> never stale", sc.tracker_stale(999999, 0) is False)
+check("stale: age over limit -> stale", sc.tracker_stale(31 * 60, 30) is True)
+check("stale: age under limit -> fresh", sc.tracker_stale(29 * 60, 30) is False)
+check("stale: unknown age (None) -> not stale", sc.tracker_stale(None, 30) is False)
+check("stale: bad limit -> not stale", sc.tracker_stale(9999, None) is False)
+
 # ---- mop-every-N cadence (per-room) ----
 check("is_mopping_mode: sweeping is False", sc.is_mopping_mode("sweeping") is False)
 check("is_mopping_mode: mopping_after_sweeping True", sc.is_mopping_mode("mopping_after_sweeping") is True)
@@ -139,6 +214,11 @@ check("cadence N=1 -> base mode, mops", (m5, w5) == ("sweeping_and_mopping", Tru
 # Non-mopping base is returned verbatim regardless of N.
 c6, m6, w6 = sc.advance_mop_cadence("sweeping", 3, None, None, "2026-07-20")
 check("cadence non-mop base stays sweeping", (m6, w6) == ("sweeping", False))
+# N=0 -> "never mop": always sweep-only, whatever the base mode (all-rug room).
+c7, m7, w7 = sc.advance_mop_cadence("mopping_after_sweeping", 0, None, None, "2026-07-20")
+check("cadence N=0 mop base -> never mops", (m7, w7) == ("sweeping", False))
+c8, m8, w8 = sc.advance_mop_cadence("sweeping_and_mopping", 0, 5, "2026-07-19", "2026-07-20")
+check("cadence N=0 stays sweep across days", (m8, w8) == ("sweeping", False))
 # Every-3rd-day cadence lands the mop on day 3.
 seq = []
 pc, pd = None, None
@@ -234,6 +314,72 @@ check("consumables None reading ignored", due4 == [] and na4.get("filter") is Tr
 due5, _ = co.evaluate_consumables({"filter": 10, "side_brush": 3}, 10, {})
 check("consumables at-threshold + multi due",
       sorted(c["key"] for c in due5) == ["filter", "side_brush"])
+
+# --- edge clean: strip geometry + schedule due ------------------------------
+_ez = sc.edge_zones_for_box(0, 0, 2000, 1600, 250)
+check("edge_zones returns 4 strips", len(_ez) == 4)
+check("edge_zones left strip hugs x0 wall", _ez[0] == [0, 0, 250, 1600])
+check("edge_zones right strip hugs x1 wall", _ez[1] == [1750, 0, 2000, 1600])
+check("edge_zones bottom strip hugs y0 wall", _ez[2] == [0, 0, 2000, 250])
+check("edge_zones top strip hugs y1 wall", _ez[3] == [0, 1350, 2000, 1600])
+# narrow room: strip width capped at half the smaller side (300/2=150), reversed coords ok
+_ezn = sc.edge_zones_for_box(1000, 500, 700, 800, 250)
+check("edge_zones narrow room caps width + normalises box",
+      _ezn[0] == [700, 500, 850, 800] and _ezn[1] == [850, 500, 1000, 800])
+
+from datetime import date as _d
+check("edge_due never-run -> due", sc.edge_due(None, 3, _d(2026, 8, 15)) is True)
+check("edge_due 3 days ago, every 3 -> due", sc.edge_due("2026-08-12", 3, _d(2026, 8, 15)) is True)
+check("edge_due 2 days ago, every 3 -> not due", sc.edge_due("2026-08-13", 3, _d(2026, 8, 15)) is False)
+check("edge_due every 0 -> disabled", sc.edge_due(None, 0, _d(2026, 8, 15)) is False)
+
+# ---- fold_room_area (per-room learning) ----
+check("fold seeds on first sample", sc.fold_room_area(None, 8.0, 2.0, 40.0) == {"area": 8.0, "n": 1})
+check("fold EMAs toward new sample",
+      sc.fold_room_area({"area": 8.0, "n": 1}, 6.0, 2.0, 40.0) == {"area": round(0.7 * 8 + 0.3 * 6, 1), "n": 2})
+check("fold clamps high outlier to hi", sc.fold_room_area(None, 999.0, 2.0, 40.0) == {"area": 40.0, "n": 1})
+check("fold clamps low outlier to lo", sc.fold_room_area(None, 2.0, 5.0, 40.0)["area"] == 5.0)
+check("fold ignores None sample", sc.fold_room_area({"area": 8.0, "n": 3}, None, 2.0, 40.0) == {"area": 8.0, "n": 3})
+check("fold ignores tiny sample (min_sample)", sc.fold_room_area({"area": 8.0, "n": 3}, 0.4, 2.0, 40.0) == {"area": 8.0, "n": 3})
+check("fold ignores bad bounds (lo>hi)", sc.fold_room_area(None, 8.0, 40.0, 2.0) is None)
+check("fold treats n=0 as unseeded", sc.fold_room_area({"area": 0.0, "n": 0}, 8.0, 2.0, 40.0) == {"area": 8.0, "n": 1})
+
+# ---- trap_learner: door-aware no-go + box clamp ----
+def _wedge(room, x, y, run, door=False):
+    return {"room": room, "x": x, "y": y, "error": "forward_suffocate",
+            "beached": True, "run_id": run, "door_closed": door}
+
+# 3 runs of physical wedges at the same spot, NO door → a real trap → no-go suggested.
+trap = [_wedge("Bedroom", 1000, 1000, f"r{i}") for i in range(3)]
+out = tl.analyze(trap)
+check("trap_learner: recurring physical wedge -> no-go", len(out["nogo_suggestions"]) == 1)
+check("trap_learner: real trap not a door_block", len(out.get("door_blocks", [])) == 0)
+
+# Same recurrence but every wedge happened with a shut door → doorway → NO no-go,
+# surfaced as a door_block instead (the Passage/Study-door case).
+door = [_wedge("Passage", 5000, 2000, f"r{i}", door=True) for i in range(3)]
+out2 = tl.analyze(door)
+check("trap_learner: shut-door wedges -> NO no-go", len(out2["nogo_suggestions"]) == 0)
+check("trap_learner: shut-door wedges -> door_block", len(out2["door_blocks"]) == 1)
+
+# Mostly route-blocked with only a few incidental beaches among many visits — a
+# doorway with no sensor (the real Passage case) → path_block, NOT a no-go.
+mixed = []
+for i in range(40):
+    e = _wedge("Passage", 3000, 8800, f"route{i}"); e["error"] = "route"; e["beached"] = False
+    mixed.append(e)
+mixed += [_wedge("Passage", 3000, 8800, f"beach{i}") for i in range(3)]   # 3/43 physical = 7%
+outm = tl.analyze(mixed)
+check("trap_learner: low physical fraction -> NO no-go", len(outm["nogo_suggestions"]) == 0)
+check("trap_learner: low physical fraction -> path_block", any(p["room"] == "Passage" for p in outm["path_blocks"]))
+
+# Box clamp: a wedge at a room's edge, box clamped to the room rect can't exceed it.
+edge = [_wedge("Passage", 5900, 2000, f"r{i}") for i in range(3)]
+rb = {"Passage": [1000, 1000, 6000, 3000]}   # Passage ends at x=6000; Study is beyond
+outc = tl.analyze(edge, room_boxes=rb)
+box = outc["nogo_suggestions"][0]["box"]
+check("trap_learner: no-go box clamped within room (x1<=6000)", box[2] <= 6000)
+check("trap_learner: no-go box stays inside room bounds", box[0] >= 1000 and box[1] >= 1000 and box[3] <= 3000)
 
 print()
 print("RESULT:", "ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}")

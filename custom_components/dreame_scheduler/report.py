@@ -331,7 +331,7 @@ def build_report(hass: HomeAssistant, entry: ConfigEntry, engine) -> dict:
     stuck_events = list(getattr(tracker, "stuck_events", []) or [])
     existing_zones = [engine._area_to_rect(z) for z in (map_attrs.get("no_go_areas") or [])]
     existing_zones = [z for z in existing_zones if z]
-    learn = trap_learner.analyze(stuck_events, existing_zones)
+    learn = trap_learner.analyze(stuck_events, existing_zones, room_boxes=engine._room_boxes_by_name())
     promoted = dict(getattr(tracker, "learned_promoted", {}) or {})
     for s in learn["nogo_suggestions"]:
         if s["key"] in promoted:
@@ -349,6 +349,14 @@ def build_report(hass: HomeAssistant, entry: ConfigEntry, engine) -> dict:
                        f"(blocked on {pb['runs']} separate runs) but never physically "
                        "reaches it — likely unmapped furniture. A virtual wall or moving "
                        "the item fixes this; a no-go would only wall off open floor.",
+        })
+    for db in learn.get("door_blocks", []):
+        suggestions.append({
+            "seg": None, "name": db["room"], "type": "door_block", "key": db["key"],
+            "message": f"{db['room']}: the robot catches on a shut door here "
+                       f"({db['runs']} runs) — this is a doorway, not an obstacle, so "
+                       "there's no no-go to apply. It cleans fine when the door's open; "
+                       "the scheduler already handles the shut-door case.",
         })
     if (learn.get("tidy_advice") or {}).get("active"):
         suggestions.append({
@@ -369,6 +377,7 @@ def build_report(hass: HomeAssistant, entry: ConfigEntry, engine) -> dict:
         # Recurring-trap learner output for the Insights view.
         "trap_suggestions": learn["nogo_suggestions"],
         "path_blocks": learn.get("path_blocks", []),
+        "door_blocks": learn.get("door_blocks", []),
         # Rooms the robot can't reach — for the "clean by hand" list AND for
         # shading those room segments red on the Insights/Map view.
         "manual_clean": dict(getattr(tracker, "manual_clean", {}) or {}),

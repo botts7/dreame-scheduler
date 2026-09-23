@@ -1,0 +1,6 @@
+#!/usr/bin/with-contenv bashio
+# Serve the baked-in app with a production WSGI server (waitress). HA's ingress
+# proxy reaches us on 0.0.0.0:8099; the app's before_request guard rejects any
+# request that didn't come through the ingress gateway.
+cd /app
+exec python3 -m waitress --host=0.0.0.0 --port=8099 --threads=6 server:app

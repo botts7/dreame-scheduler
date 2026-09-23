@@ -44,6 +44,7 @@ def _empty_state() -> dict:
         "unreachable": {},
         "day_dispatched": None,
         "catchup_dispatched": None,
+        "slots_done": None,     # per-room extra-times de-dup: {"date": iso, "keys": [seg@HH:MM]}
         "away_since": None,
         "active_run": None,
         "last_run": None,
@@ -61,7 +62,11 @@ def _empty_state() -> dict:
         "mop_counters": {},       # per-room mop cadence -> {seg: {count:int, date:"YYYY-MM-DD"}}
         "door_deferred": {},      # rooms skipped today for a shut door -> {seg: {date, retries}}
         "consumable_alerted": {}, # wear-parts we've flagged as low -> {key: True}, cleared on reset
-    }
+        "edge_run": None,         # active edge clean {segments:[remaining], done:[], ...} or None
+        "last_edge": None,        # date (YYYY-MM-DD) the last edge clean ran
+        "edge_restore": None,     # settings to put back once the robot re-docks after an edge run
+        "room_learn": {},         # per-room learned clean area {seg: {"area": m², "n": samples}}
+    }                             # (customized_cleaning can't be toggled while it's returning)
 
 
 class WeekTracker:
@@ -124,6 +129,7 @@ class WeekTracker:
         self._state["unreachable"] = {}
         self._state["day_dispatched"] = None
         self._state["catchup_dispatched"] = None
+        self._state["slots_done"] = None
         await self.async_save()
         return summary
 
@@ -170,6 +176,27 @@ class WeekTracker:
     async def async_set_catchup_dispatched(self, iso_date: str) -> None:
         self._state["catchup_dispatched"] = iso_date
         await self.async_save()
+
+    # ---- per-room extra-times de-dup (multiple cleans per day) ----
+    def slots_done_today(self, today_iso: str) -> set:
+        """Set of slot-keys already fired TODAY (empty on a new day). The store
+        keeps one day's keys; a date mismatch means yesterday's, so ignore it."""
+        sd = self._state.get("slots_done")
+        if isinstance(sd, dict) and sd.get("date") == today_iso:
+            return set(sd.get("keys") or [])
+        return set()
+
+    async def async_mark_slots(self, today_iso: str, keys) -> None:
+        """Record extra-time slot-keys fired today. Rolls to a fresh set when the
+        stored date isn't today's, so the de-dup naturally resets each morning."""
+        current = self.slots_done_today(today_iso)
+        before = len(current)
+        current.update(str(k) for k in (keys or []))
+        stored = self._state.get("slots_done")
+        stale_date = not isinstance(stored, dict) or stored.get("date") != today_iso
+        if len(current) != before or stale_date:
+            self._state["slots_done"] = {"date": today_iso, "keys": sorted(current)}
+            await self.async_save()
 
     # ---- presence grace ----
     @property
@@ -315,3 +342,37 @@ class WeekTracker:
         if flags != self.consumable_alerted:
             self._state["consumable_alerted"] = dict(flags)
             await self.async_save()
+
+    @property
+    def edge_run(self) -> dict | None:
+        return self._state.get("edge_run")
+
+    async def async_set_edge_run(self, run: dict | None) -> None:
+        self._state["edge_run"] = run
+        await self.async_save()
+
+    @property
+    def edge_restore(self) -> dict | None:
+        return self._state.get("edge_restore")
+
+    async def async_set_edge_restore(self, restore: dict | None) -> None:
+        self._state["edge_restore"] = restore
+        await self.async_save()
+
+    @property
+    def room_learn(self) -> dict:
+        return self._state.get("room_learn") or {}
+
+    async def async_set_room_learn(self, seg, entry: dict) -> None:
+        rl = dict(self._state.get("room_learn") or {})
+        rl[str(seg)] = entry
+        self._state["room_learn"] = rl
+        await self.async_save()
+
+    @property
+    def last_edge(self) -> str | None:
+        return self._state.get("last_edge")
+
+    async def async_set_last_edge(self, iso_date: str | None) -> None:
+        self._state["last_edge"] = iso_date
+        await self.async_save()

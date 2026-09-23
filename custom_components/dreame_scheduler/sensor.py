@@ -56,6 +56,7 @@ class StatusSensor(SchedulerEntity, SensorEntity):
             "robot": d.get("robot"),
             "presence_home": d.get("presence_home"),
             "presence_configured": d.get("presence_configured"),
+            "holiday": d.get("holiday"),
             "next_run": d.get("next_run"),
             "next_run_day": d.get("next_run_day"),
             "next_run_time": d.get("next_run_time"),

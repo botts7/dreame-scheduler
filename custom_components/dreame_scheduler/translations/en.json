@@ -43,6 +43,9 @@
           "catchup_enabled": "Guarantee whole house once a week",
           "catchup_day": "Catch-up day",
           "catchup_time": "Catch-up time",
+          "opportunistic_catchup": "Catch up on any free (empty) day, not just the catch-up day",
+          "holiday_enabled": "Pause cleaning on an extended absence (holiday)",
+          "holiday_after_days": "Days away before pausing (once the house is already clean)",
           "week_start_day": "Week starts on",
           "stale_nudge_enabled": "Nudge me to clean while home if overdue",
           "stale_after_days": "Nudge after this many days without a clean",
@@ -58,6 +61,7 @@
           "require_away": "Only clean when no one is home",
           "presence_entities": "People / trackers that mean 'home'",
           "away_grace_min": "Wait this long after everyone leaves",
+          "presence_stale_min": "Ignore a tracker that hasn't reported for this long (0 = off)",
           "door_retry_enabled": "Retry a door-skipped room when its door reopens",
           "door_retry_min": "Door must be open this long before retrying",
           "door_retry_while_home": "Allow that retry even when someone's home (trusts the open-time)",
@@ -86,6 +90,16 @@
           "mop_every": "Mop every N sweeps (1 = mop every clean, 2 = every 2nd day, …)",
           "repeats": "Passes",
           "door_sensor": "Door sensor (optional — skip when closed)"
+        }
+      },
+      "room_times": {
+        "title": "Extra clean times: {room}",
+        "description": "Clean this room more than once a day. Current times: {current}.\n\nPick a time and add it (tick “vacuum only” for a sweep-only pass). Leave “Save and finish” ticked to save, or untick it to add another time. Leave the list empty to just use the global daily time.",
+        "data": {
+          "remove": "Remove existing times",
+          "add_time": "Add a time",
+          "add_vac": "New time is vacuum only (no mop)",
+          "finish": "Save and finish (untick to add another)"
         }
       }
     },
