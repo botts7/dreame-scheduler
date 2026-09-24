@@ -3,6 +3,17 @@
 All notable changes to the Dreame Scheduler integration and its companion
 add-on are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.3] — 2026-09-24
+
+### Integration (`custom_components/dreame_scheduler`)
+- **Edge clean temporarily disabled, pending a proper rework.** The current
+  implementation cleans (and mops) each whole room instead of doing a true
+  wall-edge pass — it relies on time-cutting a normal segment clean, which doesn't
+  isolate the perimeter on a robot that fills back-and-forth. Rather than ship a
+  misleading feature, edge clean (scheduled and manual) is now a no-op. A rework
+  that zone-cleans the wall strips (with a sweep-only option) will re-enable it.
+- The add-on's Edge clean card is marked disabled.
+
 ## [0.5.2] — 2026-09-24
 
 ### Integration (`custom_components/dreame_scheduler`)

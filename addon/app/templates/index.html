@@ -78,16 +78,16 @@
         <div class="field"><label>Week starts on</label><span class="control"><select data-opt="week_start_day" data-weekdays></select></span></div>
       </div>
 
-      <div class="card">
-        <h2>🧭 Edge clean <span class="pill">beta</span></h2>
-        <p class="hint">Runs a <b>quiet lap along each room's real walls</b>, room by room — the robot's own wall-follow at Quiet suction (whatever each room's normal setting is), then it moves on once the walls are done rather than filling the whole room. Big furnished rooms take a while (it carefully traces every wall). Phase 1: it also runs the "invisible" room-boundary edges (open doorways / map splits), not only physical walls.</p>
+      <div class="card" style="opacity:.6">
+        <h2>🧭 Edge clean <span class="pill">temporarily disabled</span></h2>
+        <p class="hint"><b>Edge clean is turned off while it's reworked.</b> The current version does a full-room clean (and mops) instead of a true wall-edge pass, so it's disabled to avoid confusion. A proper wall-strip version is coming. The settings below are inert for now.</p>
         <div class="field"><label>Edge clean on a schedule</label><span class="control" data-toggle="edge_enabled"></span></div>
-        <div class="field"><label>Every</label><span class="control"><input type="number" min="0" max="60" step="1" data-opt="edge_every_days"> days <span class="desc">0 = off</span></span></div>
-        <div class="field"><label>At</label><span class="control"><input type="time" data-opt="edge_time"></span></div>
-        <div class="field"><label>Passes</label><span class="control"><input type="number" min="1" max="3" step="1" data-opt="edge_passes"> <span class="desc">laps per room (loop the edges)</span></span></div>
+        <div class="field"><label>Every</label><span class="control"><input type="number" min="0" max="60" step="1" data-opt="edge_every_days" disabled> days <span class="desc">0 = off</span></span></div>
+        <div class="field"><label>At</label><span class="control"><input type="time" data-opt="edge_time" disabled></span></div>
+        <div class="field"><label>Passes</label><span class="control"><input type="number" min="1" max="3" step="1" data-opt="edge_passes" disabled> <span class="desc">laps per room (loop the edges)</span></span></div>
         <div class="field"><label>Self-tune from normal cleans</label><span class="control" data-toggle="edge_learn"></span> <span class="desc">learns each room's size so the edge cut adapts (beta)</span></div>
         <div class="stack" style="margin-top:8px">
-          <button type="button" class="btn ghost" data-action="edge_clean">🧭 Edge clean now</button>
+          <button type="button" class="btn ghost" data-action="edge_clean" disabled title="Edge clean is temporarily disabled while it's reworked">🧭 Edge clean now (disabled)</button>
         </div>
       </div>
 

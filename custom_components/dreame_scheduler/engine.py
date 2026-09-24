@@ -334,6 +334,12 @@ DOCK_RADIUS_MM = 600               # within this of the charger counts as "home"
 # then wedged, with no alert. Longer than the others so it's a clean backstop.
 NO_PROGRESS_SECONDS = 480
 CONSUMABLE_CHECK_INTERVAL = 1800   # seconds between wear-part life checks (they change slowly)
+# Edge clean is TEMPORARILY DISABLED pending a proper rework: the current
+# clean_segment + time-cut approach does a full-room clean (and mops), not a true
+# wall-edge pass, because the robot fills in a boustrophedon pattern rather than
+# perimeter-first. Set back to False once edge clean zone-cleans the wall strips
+# (see scheduler.edge_zones_for_box) and honours a sweep-only option.
+EDGE_CLEAN_DISABLED = True
 EDGE_START_SECONDS = 90            # after dispatching a room, wait this long for the robot to
                                    # actually start before treating the room as done
 # Edge clean = ONE perimeter lap via the robot's native segment clean (it walls-follows
@@ -1055,6 +1061,9 @@ class SchedulerEngine:
         No quiet / customized-cleaning juggling: per-call Quiet is ignored by this
         robot (it uses the global suction, whose select the cloud 500s), so a
         reliable quiet-from-HA isn't possible — set Quiet in the app if wanted."""
+        if EDGE_CLEAN_DISABLED:
+            _LOGGER.info("edge clean is temporarily disabled (pending a proper wall-strip rework)")
+            return False
         segs = [str(s) for s in segments if self._room_box(s) is not None]
         if not segs:
             _LOGGER.info("edge: no rooms with map geometry to edge-clean")
