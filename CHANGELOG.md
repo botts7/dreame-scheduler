@@ -3,6 +3,16 @@
 All notable changes to the Dreame Scheduler integration and its companion
 add-on are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.2] — 2026-09-24
+
+### Integration (`custom_components/dreame_scheduler`)
+- **Edge clean: fix run stopping after one small room.** The edge pass stops each
+  room by a perimeter time estimate, but a room small enough to finish before that
+  estimate had the robot dock with its task "completed" — which was mis-read as the
+  user stopping the run, cancelling it after that one room. It now recognises a
+  completed task as a finished lap and advances to the next room, so the run walks
+  the whole house. Big rooms are still cut by time as before.
+
 ## [0.5.1] — 2026-09-23
 
 ### Add-on (`addon/`)

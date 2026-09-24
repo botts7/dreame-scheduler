@@ -1137,11 +1137,21 @@ class SchedulerEngine:
                 return                              # still on its way to the room
             await self._edge_advance(edge, now)     # never started in time → skip on
             return
-        # It cleaned, then stopped, and the lap's time-cut did NOT fire (else we'd have
-        # advanced above). With ct-based timing the robot can't finish a room before its
-        # perimeter time, so a SUSTAINED idle here means the run was stopped EXTERNALLY —
-        # the user docked it, or a persistent error. Don't march on to the next room:
-        # CANCEL. A mop-wash / post-error blip resumes within the debounce (clearing
+        # Small room finished on its OWN before the time-cut: the robot cleaned the
+        # whole segment and idled/docked with its task reported COMPLETED. That's a
+        # finished lap, not the user stopping it — advance to the next room instead
+        # of cancelling the run. (The time-cut in _edge_lap_done only catches BIG
+        # rooms the robot can't fully clean before edge_secs; a small room finishes
+        # first, which used to be mis-read as an external stop and killed the run.)
+        task = (self._sval(entity_of("sensor", self._prefix, SUF_TASK_STATUS)) or "").lower()
+        if edge.get("seen_cleaning") and task == "completed":
+            _LOGGER.info("edge: %s finished early (task completed) — advancing", edge.get("current"))
+            await self._edge_advance(edge, now)
+            return
+        # It cleaned, then stopped, the time-cut didn't fire, and the task isn't
+        # 'completed' — so a SUSTAINED idle here means the run was stopped EXTERNALLY
+        # (the user docked it, or a persistent error). Don't march on: CANCEL. A
+        # mop-wash / post-error blip resumes within the debounce (clearing
         # stopped_since), so it won't trip this.
         stopped = _parse_iso(edge.get("stopped_since"))
         if stopped is None or (now - stopped).total_seconds() < EDGE_FINISH_GRACE:
