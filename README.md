@@ -142,6 +142,14 @@ the add-on's **Add to HA** tab which generates the cards with your entity ids.
 
 Requires Home Assistant **2025.12+** and the `dreame_vacuum` integration.
 
+## Multi-floor homes
+
+Multi-floor (multiple robot maps) isn't supported yet. `dreame_vacuum` shares one
+set of room entities across all maps and reuses room ids per floor, so the
+scheduler currently mixes up which rooms were cleaned when you switch floors. For
+now, point the scheduler at a single floor and run other floors manually. Proper
+per-map tracking is on the [roadmap](docs/ROADMAP.md).
+
 ## Troubleshooting
 
 ### A room is skipped every run as "Blocked by door" — but there is no door
