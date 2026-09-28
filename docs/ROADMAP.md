@@ -171,3 +171,53 @@ the house is empty, even when nothing has been walked on since the last clean.
 **Effort:** small-to-medium — one gate (away-duration + all-clean → suppress) in
 the dispatch path, two/three options + toggles, and a status string. Compose with
 Feature 3 (opportunistic) so a long absence settles instead of cleaning daily.
+
+---
+
+## 5. Multi-floor / multi-map awareness (planned, not started)
+
+**Request:** a schedule set for the first floor gets confused about what was
+vacuumed after switching to the second floor. (HA community thread, RickDangerous.)
+
+**Root cause:** the underlying `dreame_vacuum` integration shares one set of room
+entities across all saved maps (by design, to avoid generating ~100 extra entities
+in a multi-floor house, per tasshack), and segment ids restart at 1 on each map.
+So floor-1 "room 3" and floor-2 "room 3" are the same id/entity. Our `week_tracker`
+keys everything (`cleaned`, `unreachable`, `mop_counters`, `door_deferred`,
+`room_learn`, `slots_done`, `manual_clean`, `history`) by segment id alone, so the
+two floors' state collides: floor 1's cleaned/pending carries onto floor 2.
+
+**What `dreame_vacuum` exposes (researched):**
+- `select.{vacuum}_selected_map`: the active map (only available when multi-floor
+  is enabled). This is what we key the fix on.
+- `switch.{vacuum}_multi_floor_map`: must be ON before the map can be switched.
+- `switch.{vacuum}_intelligent_recognition`: optional auto floor-detect; otherwise
+  map selection is manual.
+- `camera.{vacuum}_map_1..3`: up to 3 saved maps (indexing system; ids churn, so the
+  index / `map_id` attribute is the stable-ish handle).
+- Switching the selected map ENDS any active cleaning job.
+
+**Design:**
+- **State keying:** namespace every `week_tracker` per-room key by the active map,
+  e.g. `"{map}:{seg}"` (map = selected-map index or `map_id`), or nest state under a
+  `maps: {map: {cleaned, unreachable, ...}}` dict. Migrate old flat keys into the
+  currently-selected map on first load. Read the active map from
+  `select.{vacuum}_selected_map`; fall back to single-map behaviour when multi-floor
+  is off or the entity is absent, so single-floor homes are unchanged.
+- **Room config:** rooms come from the shared entities, which reflect the selected
+  map, so per-map scheduling config (`OPT_ROOMS`) must also be namespaced per map,
+  or re-scoped when the map changes.
+- **Run orchestration (the harder half):** to actually clean a second floor the
+  scheduler must switch `selected_map` (which ends the current job and needs
+  `multi_floor_map` on), so a multi-floor run is: dispatch floor A's due rooms,
+  switch map, dispatch floor B's due rooms, each floor on its own schedule/state.
+  v1 could be tracking-only (correct per-map bookkeeping while the user or robot
+  drives which map is active), with driven map-switching as a follow-up.
+
+**Effort:** medium-large. `week_tracker` schema plus migration, an active-map read
+in the engine tick, per-map `OPT_ROOMS`, and (phase 2) map-switch orchestration. No
+change to the pure `scheduler` logic beyond taking a map-scoped state slice.
+
+**Open questions (asked RickDangerous):** how many maps, is `multi_floor_map` or
+`intelligent_recognition` enabled, manual vs auto map switch, one robot or one per
+floor.
