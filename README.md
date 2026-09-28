@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="images/banner.png" alt="Dreame Scheduler" width="720">
+  <img src="https://raw.githubusercontent.com/botts7/dreame-scheduler/main/images/banner.png" alt="Dreame Scheduler" width="720">
 </p>
 
 <p align="center">
@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/HACS-Custom-41BDF5" alt="HACS">
+  <img src="https://img.shields.io/badge/HACS-Default-41BDF5" alt="HACS">
   <img src="https://img.shields.io/github/v/release/botts7/dreame-scheduler?label=version&color=blue&sort=semver" alt="version">
   <img src="https://img.shields.io/github/license/botts7/dreame-scheduler?color=green" alt="license">
 </p>
@@ -28,15 +28,15 @@ rooting. One config entry per robot; add it again for a second vacuum.
 
 The companion **Dreame Scheduler** add-on gives you a full panel _(floor-plan details blurred for privacy)_:
 
-<p align="center"><img src="images/home.png" alt="Overview dashboard" width="820"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/botts7/dreame-scheduler/main/images/home.png" alt="Overview dashboard" width="820"></p>
 
 _Overview — robot status, next run, this week's progress, suggestions and coverage._
 
-<p align="center"><img src="images/map.png" alt="Floor Plan Studio" width="820"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/botts7/dreame-scheduler/main/images/map.png" alt="Floor Plan Studio" width="820"></p>
 
 _Floor Plan Studio (beta) — draw no-go / no-mop zones and virtual walls, auto-fit &amp; weld rooms, a live 3D view, and export to your own dashboard._
 
-<p align="center"><img src="images/report.png" alt="Weekly report" width="820"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/botts7/dreame-scheduler/main/images/report.png" alt="Weekly report" width="820"></p>
 
 _Report — per-room status this week, why rooms were missed, and the robot's own coverage renders._
 
@@ -60,8 +60,9 @@ _Report — per-room status this week, why rooms were missed, and the robot's ow
 - **Holiday / extended-away pause** (opt-in) — once everyone's been away a set
   number of days and the house is already clean, cleaning pauses instead of
   re-cleaning an empty house; it resumes as soon as someone's home.
-- **Edge cleaning** — a dedicated pass that sweeps along each room's walls, on a
-  cadence or on demand, self-tuning to each room from observed cleaning.
+- **Edge cleaning** — a dedicated pass that zone-cleans thin strips along each
+  room's walls (tracing the perimeter, not filling the room), on a cadence or on
+  demand. Sweep-only by default so the edges stay dry.
 - **Stale-tracker watchdog** (opt-in) — a presence entity that hasn't reported
   for a set time is treated as stale and ignored, so a wedged phone stuck at
   "home" can't silently block cleaning.
@@ -106,11 +107,20 @@ Each accepts an optional `vacuum` target; omit it in a single-robot home.
 
 ## Companion add-on
 
-The **Dreame Scheduler** add-on is a config panel (behind ingress) for
-everything here, plus a report view, ready-to-paste dashboard cards and the
-optional Floor Plan Studio. It's a separate install — see
-[dreame-scheduler-addon](https://github.com/botts7/dreame-scheduler-addon).
-The integration works fully without it (via the options flow and services).
+The **Dreame Scheduler** add-on is the panel where you set up and monitor the
+scheduler (rooms, days, times, presence), plus a report view, ready-to-paste
+dashboard cards and the optional Floor Plan Studio. Install both: the
+integration is the engine that runs the schedule, and the add-on is where you
+configure it.
+
+The add-on is **not installed through HACS** (HACS only handles the
+integration). Install the add-on through the **Add-on Store**:
+
+1. Settings → Add-ons → **Add-on Store** → ⋮ (top right) → **Repositories**.
+2. Paste `https://github.com/botts7/dreame-scheduler-addon`, press **Add**, then
+   close the dialog.
+3. Find **Dreame Scheduler** in the store list → **Install** → **Start**, and
+   turn on "Show in sidebar".
 
 ## Lovelace card
 
@@ -122,8 +132,9 @@ the add-on's **Add to HA** tab which generates the cards with your entity ids.
 
 ## Install (HACS)
 
-1. HACS → ⋮ → **Custom repositories** → add this repo, category **Integration**.
-2. Install, restart Home Assistant.
+1. In **HACS**, search for **Dreame Scheduler** and install it (it's in the
+   default HACS store, so no custom repository is needed).
+2. Restart Home Assistant.
 3. **Settings → Devices & Services → Add Integration → Dreame Scheduler**, pick
    your vacuum.
 4. Open the integration's **Configure** to set presence, window, and per-room
