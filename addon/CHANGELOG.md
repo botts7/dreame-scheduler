@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.2
+
+- **Robot picker** for multi-vacuum homes (e.g. one robot per floor). When more
+  than one Dreame Scheduler is set up, a "Robot" selector appears in the header;
+  pick one to configure its schedule, rooms and report. Hidden with a single
+  robot, so nothing changes for most setups. Pairs with integration 0.6.1.
+
 ## 0.6.1
 
 - Hide the **Edge clean** card. Edge clean is disabled in the integration pending

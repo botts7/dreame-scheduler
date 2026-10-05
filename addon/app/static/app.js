@@ -5,6 +5,8 @@
 const WEEK = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 let CFG = null;          // get_config response
 let OPTS = {};           // working options (edited copy)
+let SELECTED_VAC = null; // vacuum (config entry) being edited; null = first/default. Multi-robot homes.
+function vacQ() { return SELECTED_VAC ? "?vacuum=" + encodeURIComponent(SELECTED_VAC) : ""; }
 let ENTITIES = [];       // picker entities
 let NOTIFY = [];         // notify service names
 
@@ -53,7 +55,7 @@ async function api(path, opts) {
 async function boot() {
   try {
     const [cfg, states, notify] = await Promise.all([
-      api("api/ha/config"),
+      api("api/ha/config" + vacQ()),
       api("api/ha/states").catch(() => ({ entities: [] })),
       api("api/ha/notify_services").catch(() => ({ services: [] })),
     ]);
@@ -65,13 +67,51 @@ async function boot() {
       return;
     }
     OPTS = Object.assign({}, cfg.options);
+    SELECTED_VAC = cfg.vacuum || SELECTED_VAC;   // lock onto the entry we actually loaded
     $("#subtitle").textContent = cfg.title + " · " + Object.keys(cfg.rooms || {}).length + " rooms";
+    renderVacPicker();
     render();
     _homeLoaded = true; renderHome();   // Home is the default tab
   } catch (e) {
     $("#load-banner").style.display = "block";
     $("#load-banner").textContent = "Couldn't reach Home Assistant: " + e.message;
   }
+}
+
+// Multi-robot homes (e.g. one vacuum per floor) get a robot picker in the header.
+// Each vacuum is its own scheduler config entry; switching reloads that entry's
+// settings/rooms/report. Hidden when there's only one robot.
+function renderVacPicker() {
+  const vacs = (CFG && CFG.vacuums) || [];
+  let wrap = document.getElementById("vac-picker-wrap");
+  if (vacs.length <= 1) { if (wrap) wrap.remove(); return; }
+  if (!wrap) {
+    wrap = document.createElement("div");
+    wrap.id = "vac-picker-wrap";
+    wrap.style.cssText = "display:flex;align-items:center;gap:6px;margin-top:4px;font-size:.85rem";
+    const sub = document.getElementById("subtitle");
+    if (sub && sub.parentNode) sub.parentNode.insertBefore(wrap, sub.nextSibling);
+  }
+  const cur = SELECTED_VAC || (CFG && CFG.vacuum);
+  wrap.innerHTML = "";
+  const label = document.createElement("span"); label.textContent = "Robot"; label.className = "desc";
+  const sel = document.createElement("select");
+  sel.setAttribute("aria-label", "Which robot to configure");
+  vacs.forEach(v => {
+    const o = document.createElement("option");
+    o.value = v.vacuum; o.textContent = v.title || v.vacuum;
+    if (v.vacuum === cur) o.selected = true;
+    sel.appendChild(o);
+  });
+  sel.addEventListener("change", () => {
+    if (MAP_DIRTY && !confirm("Switch robot? Unsaved changes on this one will be lost.")) {
+      renderVacPicker(); return;
+    }
+    SELECTED_VAC = sel.value;
+    REPORT = null; MAP = null; _reportLoaded = false; MAP_DIRTY = false;
+    boot();   // reload config / rooms / report for the chosen robot
+  });
+  wrap.appendChild(label); wrap.appendChild(sel);
 }
 
 function render() {
@@ -442,7 +482,7 @@ async function save() {
     });
     await api("api/ha/config", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ options: OPTS }),
+      body: JSON.stringify(SELECTED_VAC ? { options: OPTS, vacuum: SELECTED_VAC } : { options: OPTS }),
     });
     MAP_DIRTY = false;
     if (document.getElementById("map-panel")) renderMapPanel();
@@ -1152,7 +1192,7 @@ async function renderMap() {
     no_mops: (m.no_mopping_areas || []).map(_coerceBox).filter(Boolean),
   };
   // obstacles to plot (from the report; fetch it if the Report tab wasn't opened)
-  if (!REPORT) { try { REPORT = await api("api/ha/report"); } catch (e) {} }
+  if (!REPORT) { try { REPORT = await api("api/ha/report" + vacQ()); } catch (e) {} }
   MAP_OBSTACLES = (REPORT && REPORT.obstacles) || [];
   document.getElementById("map-toolbar").style.display = "flex";
   document.getElementById("map-side").style.display = "block";
@@ -2530,7 +2570,7 @@ const DECK_META = {}; DECK_REGISTRY.forEach(c => DECK_META[c.id] = c);
 
 async function renderHome() {
   const deck = $("#card-deck");
-  try { if (!REPORT) REPORT = await api("api/ha/report"); }
+  try { if (!REPORT) REPORT = await api("api/ha/report" + vacQ()); }
   catch (e) { deck.innerHTML = '<div class="hint err">Could not load: ' + esc(e.message) + "</div>"; return; }
   _syncHeaderRobot();
   $("#home-title").textContent = CFG && CFG.title ? CFG.title.trim() : "Overview";
@@ -3218,7 +3258,7 @@ const STATUS_META = {
 async function loadReport() {
   const box = $("#report-rooms");
   try {
-    REPORT = await api("api/ha/report");
+    REPORT = await api("api/ha/report" + vacQ());
     _syncHeaderRobot();
     if (!REPORT || REPORT.found === false) {
       box.innerHTML = '<div class="hint">No report available yet.</div>';

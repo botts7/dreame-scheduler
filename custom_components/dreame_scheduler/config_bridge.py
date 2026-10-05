@@ -343,6 +343,13 @@ def async_register_config_services(hass: HomeAssistant) -> None:
             "map_camera": f"camera.{prefix}_map",
             "map": map_key,
             "maps": map_options,
+            # All scheduled robots, so the add-on can offer a vacuum picker in a
+            # multi-robot (e.g. one-per-floor) home. `vacuum` above is the one
+            # currently being edited.
+            "vacuums": [
+                {"vacuum": e.data.get(CONF_VACUUM_ENTITY), "title": e.title}
+                for e in hass.config_entries.async_entries(DOMAIN)
+            ],
         }
 
     async def _async_set_config(call: ServiceCall) -> None:

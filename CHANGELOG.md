@@ -3,6 +3,18 @@
 All notable changes to the Dreame Scheduler integration and its companion
 add-on are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.6.1] (2026-10-05)
+
+### Integration (`custom_components/dreame_scheduler`)
+- **Multi-robot homes.** `get_config` (used by the add-on GUI) now returns the
+  full list of scheduled vacuums, so the add-on can offer a robot picker for a
+  one-scheduler-per-robot home. No behaviour change for a single robot.
+
+### Add-on (`addon/`)
+- See add-on 0.6.2: a **robot picker** in the header when more than one vacuum is
+  set up; switching it loads that robot's settings, rooms and report. Hidden with
+  a single robot.
+
 ## [0.6.0] (2026-10-05)
 
 Multi-floor / multi-map support (beta), plus the companion add-on brought up to
