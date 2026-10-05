@@ -33,7 +33,8 @@ from .const import (
     DEFAULT_EDGE_EVERY_DAYS,
     DEFAULT_EDGE_TIME,
     DEFAULT_EDGE_PASSES,
-    DEFAULT_EDGE_LEARN,
+    DEFAULT_EDGE_STRIP_MM,
+    DEFAULT_EDGE_NO_MOP,
     DEFAULT_DAILY_TIME,
     DEFAULT_GUARD_DUSTBIN,
     DEFAULT_GUARD_WATER,
@@ -69,7 +70,8 @@ from .const import (
     OPT_EDGE_EVERY_DAYS,
     OPT_EDGE_TIME,
     OPT_EDGE_PASSES,
-    OPT_EDGE_LEARN,
+    OPT_EDGE_STRIP_MM,
+    OPT_EDGE_NO_MOP,
     OPT_DAILY_TIME,
     OPT_DEFAULT_MODE,
     OPT_DEFAULT_SUCTION,
@@ -108,7 +110,11 @@ from .const import (
     WEEKDAYS,
     room_entity,
 )
-from .scheduler import room_times as _norm_room_times
+from .scheduler import (
+    room_times as _norm_room_times,
+    active_map_key,
+    migrate_rooms_to_maps,
+)
 
 _WEEKDAY_OPTIONS = [
     selector.SelectOptionDict(value=str(i), label=WEEKDAYS[i]) for i in range(7)
@@ -180,6 +186,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         self._rooms_cfg: dict = {}
         self._room_entry: dict = {}
         self._room_times: list = []
+        self._rooms_full: dict = {}       # nested {map: {seg: cfg}} being edited
+        self._rooms_map_key: str = ""     # the map slice room edits write back to
 
     # -------- helpers --------
     @property
@@ -202,6 +210,12 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             if st and str(st.state).lower() not in ("unknown", "unavailable", "", "none"):
                 rooms[str(n)] = st.state
         return rooms
+
+    def _map_key(self) -> str:
+        """The robot's currently-selected map (multi-floor). The room entities and
+        this config both target this map; single-map homes resolve to the default."""
+        st = self.hass.states.get(f"select.{self._prefix}_selected_map")
+        return active_map_key(st.state if st else None)
 
     def _save(self, updates: dict):
         return self.async_create_entry(
@@ -257,7 +271,9 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             vol.Optional(OPT_EDGE_TIME, default=self._opt(OPT_EDGE_TIME, DEFAULT_EDGE_TIME)): selector.TimeSelector(),
             vol.Optional(OPT_EDGE_PASSES, default=self._opt(OPT_EDGE_PASSES, DEFAULT_EDGE_PASSES)): selector.NumberSelector(
                 selector.NumberSelectorConfig(min=1, max=3, step=1, unit_of_measurement="passes", mode=selector.NumberSelectorMode.BOX)),
-            vol.Optional(OPT_EDGE_LEARN, default=self._opt(OPT_EDGE_LEARN, DEFAULT_EDGE_LEARN)): selector.BooleanSelector(),
+            vol.Optional(OPT_EDGE_STRIP_MM, default=self._opt(OPT_EDGE_STRIP_MM, DEFAULT_EDGE_STRIP_MM)): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=100, max=600, step=10, unit_of_measurement="mm", mode=selector.NumberSelectorMode.BOX)),
+            vol.Optional(OPT_EDGE_NO_MOP, default=self._opt(OPT_EDGE_NO_MOP, DEFAULT_EDGE_NO_MOP)): selector.BooleanSelector(),
             vol.Optional(OPT_STALE_NUDGE_ENABLED, default=self._opt(OPT_STALE_NUDGE_ENABLED, DEFAULT_STALE_NUDGE_ENABLED)): selector.BooleanSelector(),
             vol.Optional(OPT_STALE_AFTER_DAYS, default=self._opt(OPT_STALE_AFTER_DAYS, DEFAULT_STALE_AFTER_DAYS)): selector.NumberSelector(
                 selector.NumberSelectorConfig(min=1, max=30, step=1, unit_of_measurement="days", mode=selector.NumberSelectorMode.BOX)),
@@ -328,7 +344,12 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
     # -------- rooms: edit the chosen one --------
     async def async_step_room_edit(self, user_input=None):
         seg = self._seg
-        rooms_cfg = dict(self._opt(OPT_ROOMS, {}) or {})
+        # Per-map (multi-floor): edit the currently-selected map's room slice and
+        # merge it back, leaving other maps untouched. A legacy flat config is
+        # migrated to the nested {map: {seg: cfg}} shape on save.
+        self._rooms_full = migrate_rooms_to_maps(self._opt(OPT_ROOMS, {}) or {})
+        self._rooms_map_key = self._map_key()
+        rooms_cfg = dict(self._rooms_full.get(self._rooms_map_key, {}) or {})
         cur = dict(rooms_cfg.get(seg, {}))
 
         if user_input is not None:
@@ -437,7 +458,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 else:
                     entry.pop(ROOM_TIMES, None)
                 self._rooms_cfg[self._seg] = entry
-                return self._save({OPT_ROOMS: self._rooms_cfg})
+                self._rooms_full[self._rooms_map_key] = self._rooms_cfg
+                return self._save({OPT_ROOMS: self._rooms_full})
             return await self.async_step_room_times()      # loop to add another
 
         remove_opts = self._times_labels()

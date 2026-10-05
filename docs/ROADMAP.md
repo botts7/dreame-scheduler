@@ -174,7 +174,7 @@ Feature 3 (opportunistic) so a long absence settles instead of cleaning daily.
 
 ---
 
-## 5. Multi-floor / multi-map awareness (planned, not started)
+## 5. Multi-floor / multi-map awareness (implemented 0.6.0, beta)
 
 **Request:** a schedule set for the first floor gets confused about what was
 vacuumed after switching to the second floor. (HA community thread, RickDangerous.)

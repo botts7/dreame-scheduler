@@ -3,6 +3,33 @@
 All notable changes to the Dreame Scheduler integration and its companion
 add-on are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] (2026-10-05)
+
+Multi-floor / multi-map support (beta), plus the companion add-on brought up to
+date with the 0.4 and 0.5 feature set that had never reached the add-on store.
+
+### Integration (`custom_components/dreame_scheduler`)
+- **Multi-floor / multi-map support (beta).** For a single robot with more than
+  one saved map, the scheduler now tracks each map separately and follows the
+  robot's selected map, so two floors no longer share cleaned and pending state
+  (Dreame reuses room ids across maps, which is what made it mix the floors up).
+  Per-room schedules are per map as well. Single-map homes are unaffected: they
+  keep one unnamespaced slice and behave exactly as before, and existing state
+  migrates across with no loss. Marked beta because the two-map switching is
+  covered by tests and verified on a single-map box, but real two-map setups are
+  still being trialled. Feedback very welcome.
+- Edge clean stays **disabled**, unchanged from 0.5.3, pending a proper
+  wall-geometry rework (the earlier bounding-box strips cleaned neighbouring rooms).
+
+### Add-on (`addon/`)
+- **Brought up to date.** The add-on store copy had been stuck at 0.3.4, so the
+  per-room controls added since never appeared in the panel. This ships them: the
+  **Mop cadence** dropdown (including "Never", sweep only, for all-rug rooms), the
+  **Extra times** editor (clean a room more than once a day, with a "vacuum only"
+  tick per time), and the holiday-pause, opportunistic catch-up and stale-tracker
+  options. These are per-room settings, so open a room's gear (settings) button on
+  the Rooms tab to see them.
+
 ## [0.5.3] — 2026-09-24
 
 ### Integration (`custom_components/dreame_scheduler`)

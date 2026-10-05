@@ -31,6 +31,86 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
 
+# ---- multi-floor / multi-map support --------------------------------------
+# Dreame reuses room segment-ids across saved maps (floor-1 "room 3" and floor-2
+# "room 3" share an id/entity), so per-room state and per-room config must be
+# scoped by the active map. A single-map home (or multi-floor disabled) has no
+# usable selected-map entity, so it falls back to DEFAULT_MAP_KEY and behaves
+# exactly as before. See docs/ROADMAP.md #5.
+DEFAULT_MAP_KEY = "default"
+
+# room-config field names, used to tell a legacy flat {seg: cfg} dict apart from
+# the nested {map: {seg: cfg}} shape.
+_ROOM_FIELDS = frozenset({"enabled", "days", "mode", "suction", "wetness",
+                          "repeats", "door_sensor", "times", "mop_every", "name"})
+
+# per-room / per-day state that collides across maps and must live under maps[key].
+MAP_SCOPED_STATE_KEYS = (
+    "cleaned", "unreachable", "day_dispatched", "catchup_dispatched",
+    "slots_done", "mop_counters", "door_deferred", "manual_clean",
+    "room_learn", "last_edge",
+)
+
+
+def active_map_key(selected_map_state) -> str:
+    """Normalise a ``select.<vacuum>_selected_map`` state into a map key.
+
+    Unavailable / unknown / empty (a single-map home, or multi-floor disabled)
+    maps to DEFAULT_MAP_KEY, so single-floor setups keep one unnamespaced slice
+    and behave exactly as before multi-map support."""
+    if selected_map_state is None:
+        return DEFAULT_MAP_KEY
+    s = str(selected_map_state).strip()
+    if not s or s.lower() in ("unavailable", "unknown", "none"):
+        return DEFAULT_MAP_KEY
+    return s
+
+
+def is_flat_rooms(rooms) -> bool:
+    """True if ``rooms`` is the legacy flat {seg: cfg} shape rather than the
+    nested per-map {map: {seg: cfg}} shape. Empty/degenerate -> False."""
+    if not isinstance(rooms, dict) or not rooms:
+        return False
+    first = next(iter(rooms.values()))
+    if not isinstance(first, dict):
+        return False
+    # a room-config value carries room fields; a map value is {seg: cfg}.
+    return bool(_ROOM_FIELDS & set(first.keys()))
+
+
+def migrate_rooms_to_maps(rooms) -> dict:
+    """Normalise OPT_ROOMS to the nested {map: {seg: cfg}} shape (idempotent)."""
+    if is_flat_rooms(rooms):
+        return {DEFAULT_MAP_KEY: dict(rooms)}
+    return dict(rooms or {})
+
+
+def rooms_for_map(rooms, map_key: str) -> dict:
+    """The {seg: cfg} slice for ``map_key``.
+
+    A legacy flat config isn't map-namespaced yet, so it applies to WHATEVER map
+    is active — otherwise enabling multi-floor (which flips the active key from
+    "default" to the map's name) would blank an existing schedule. Once the
+    config is per-map (nested), each map uses only its own slice."""
+    if is_flat_rooms(rooms):
+        return dict(rooms)
+    return dict((rooms or {}).get(map_key, {}) or {})
+
+
+def migrate_state_to_maps(state: dict) -> dict:
+    """Move legacy top-level per-room state into maps[DEFAULT_MAP_KEY], in place.
+
+    Idempotent: a state that already carries non-empty ``maps`` is left as-is."""
+    if not isinstance(state, dict):
+        return state
+    maps = state.get("maps")
+    if isinstance(maps, dict) and maps:          # already migrated
+        return state
+    slice_ = {k: state.pop(k) for k in MAP_SCOPED_STATE_KEYS if k in state}
+    state["maps"] = {DEFAULT_MAP_KEY: slice_} if slice_ else {}
+    return state
+
+
 def _enabled_rooms(rooms: dict) -> dict:
     """Just the rooms flagged enabled, keyed by segment-id string."""
     return {
@@ -451,6 +531,28 @@ def edge_zones_for_box(x0, y0, x1, y1, width):
         [x0, y1 - w, x1, y1],     # fourth wall
     ]
     return [[int(round(v)) for v in s] for s in strips]
+
+
+def batch_edge_zones(boxes, width, cap=32):
+    """Flatten the wall strips of several rooms into zone-clean BATCHES, each no
+    larger than the firmware's per-task zone cap.
+
+    ``boxes`` is an ordered list of ``(seg, [x0,y0,x1,y1])`` for the rooms to
+    edge-clean (a ``None``/short box is skipped). Each room contributes its four
+    wall strips (via ``edge_zones_for_box``); the strips are concatenated in room
+    order and chunked into lists of at most ``cap`` rectangles. A later
+    ``vacuum_clean_zone`` REPLACES the prior task, so each batch must be sent and
+    finished before the next — but a whole small home (<= cap/4 rooms) is one batch.
+
+    Returns ``list[list[rect]]`` (empty when no room has geometry). Pure."""
+    rects = []
+    for item in (boxes or []):
+        box = item[1] if isinstance(item, (list, tuple)) and len(item) == 2 else item
+        if not (isinstance(box, (list, tuple)) and len(box) == 4):
+            continue
+        rects.extend(edge_zones_for_box(box[0], box[1], box[2], box[3], width))
+    cap = max(1, int(cap))
+    return [rects[i:i + cap] for i in range(0, len(rects), cap)]
 
 
 def edge_due(last_iso, every_days, today):

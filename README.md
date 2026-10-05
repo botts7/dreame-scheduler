@@ -144,11 +144,18 @@ Requires Home Assistant **2025.12+** and the `dreame_vacuum` integration.
 
 ## Multi-floor homes
 
-Multi-floor (multiple robot maps) isn't supported yet. `dreame_vacuum` shares one
-set of room entities across all maps and reuses room ids per floor, so the
-scheduler currently mixes up which rooms were cleaned when you switch floors. For
-now, point the scheduler at a single floor and run other floors manually. Proper
-per-map tracking is on the [roadmap](docs/ROADMAP.md).
+**Two separate robots** (one per floor) are fully supported: add the integration
+once per vacuum, and each one gets its own independent schedule, presence gating
+and tracking.
+
+**One robot with multiple saved maps** is supported from **0.6.0 as a beta**. The
+scheduler tracks each map separately and follows the robot's selected map, so each
+floor keeps its own schedule and its own cleaned/pending state (previously they
+collided, because `dreame_vacuum` shares one set of room entities across maps and
+reuses room ids per floor). Turn on multi-floor on the robot, then configure each
+floor's rooms with that map selected. Single-map homes are unaffected. Still being
+trialled on real two-map setups, so feedback is welcome. See the
+[roadmap](docs/ROADMAP.md).
 
 ## Troubleshooting
 

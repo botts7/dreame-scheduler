@@ -327,6 +327,15 @@ _ezn = sc.edge_zones_for_box(1000, 500, 700, 800, 250)
 check("edge_zones narrow room caps width + normalises box",
       _ezn[0] == [700, 500, 850, 800] and _ezn[1] == [850, 500, 1000, 800])
 
+# batch_edge_zones: 4 strips/room, chunked to the firmware cap.
+_bz2 = sc.batch_edge_zones([("1", [0, 0, 2000, 1600]), ("2", [0, 0, 1000, 1000])], 250, cap=32)
+check("batch: 2 rooms -> 8 strips in one batch", len(_bz2) == 1 and len(_bz2[0]) == 8)
+check("batch: first strip is room 1's left wall", _bz2[0][0] == [0, 0, 250, 1600])
+_bz_cap = sc.batch_edge_zones([("%d" % i, [0, 0, 2000, 1600]) for i in range(10)], 250, cap=32)
+check("batch: 10 rooms (40 strips) -> chunks of 32 then 8", [len(b) for b in _bz_cap] == [32, 8])
+check("batch: skips rooms without a valid box", sc.batch_edge_zones([("1", None), ("2", [0, 0, 100, 100])], 250) == [sc.edge_zones_for_box(0, 0, 100, 100, 250)])
+check("batch: no rooms -> []", sc.batch_edge_zones([], 250) == [])
+
 from datetime import date as _d
 check("edge_due never-run -> due", sc.edge_due(None, 3, _d(2026, 8, 15)) is True)
 check("edge_due 3 days ago, every 3 -> due", sc.edge_due("2026-08-12", 3, _d(2026, 8, 15)) is True)
@@ -380,6 +389,35 @@ outc = tl.analyze(edge, room_boxes=rb)
 box = outc["nogo_suggestions"][0]["box"]
 check("trap_learner: no-go box clamped within room (x1<=6000)", box[2] <= 6000)
 check("trap_learner: no-go box stays inside room bounds", box[0] >= 1000 and box[1] >= 1000 and box[3] <= 3000)
+
+# ---- multi-map / multi-floor helpers ----
+check("active_map_key None -> default", sc.active_map_key(None) == "default")
+check("active_map_key unavailable -> default", sc.active_map_key("unavailable") == "default")
+check("active_map_key unknown -> default", sc.active_map_key("unknown") == "default")
+check("active_map_key blank -> default", sc.active_map_key("   ") == "default")
+check("active_map_key real name kept", sc.active_map_key("Upstairs") == "Upstairs")
+
+_flat = {"3": {"enabled": True, "days": [0, 1]}, "5": {"enabled": False, "days": []}}
+_nested = {"default": _flat, "Upstairs": {"3": {"enabled": True, "days": [2]}}}
+check("is_flat_rooms flat -> True", sc.is_flat_rooms(_flat) is True)
+check("is_flat_rooms nested -> False", sc.is_flat_rooms(_nested) is False)
+check("is_flat_rooms empty -> False", sc.is_flat_rooms({}) is False)
+check("migrate_rooms flat -> wrapped under default", sc.migrate_rooms_to_maps(_flat) == {"default": _flat})
+check("migrate_rooms nested -> unchanged", sc.migrate_rooms_to_maps(_nested) == _nested)
+check("rooms_for_map flat as default", sc.rooms_for_map(_flat, "default") == _flat)
+check("rooms_for_map flat applies to any active map (no blank on multi-floor enable)", sc.rooms_for_map(_flat, "Upstairs") == _flat)
+check("rooms_for_map nested slice", sc.rooms_for_map(_nested, "Upstairs") == {"3": {"enabled": True, "days": [2]}})
+check("rooms_for_map nested missing -> empty", sc.rooms_for_map(_nested, "Nope") == {})
+
+_old_state = {"enabled": True, "week_start": "2026-09-21", "cleaned": {"3": "ts"},
+              "unreachable": {"5": 2}, "day_dispatched": "2026-09-28", "away_since": None}
+sc.migrate_state_to_maps(_old_state)
+check("migrate_state moves cleaned into default map", _old_state["maps"]["default"]["cleaned"] == {"3": "ts"})
+check("migrate_state moves day_dispatched", _old_state["maps"]["default"]["day_dispatched"] == "2026-09-28")
+check("migrate_state keeps global keys top-level", _old_state.get("week_start") == "2026-09-21" and "cleaned" not in _old_state)
+_already = {"maps": {"default": {"cleaned": {"1": "x"}}}, "week_start": "w"}
+sc.migrate_state_to_maps(_already)
+check("migrate_state idempotent when maps present", _already["maps"]["default"]["cleaned"] == {"1": "x"})
 
 print()
 print("RESULT:", "ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}")

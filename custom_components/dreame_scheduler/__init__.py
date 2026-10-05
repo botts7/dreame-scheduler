@@ -33,11 +33,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await coordinator.async_config_entry_first_refresh()   # seed data (defaults)
     try:
         await coordinator.engine.async_start()             # load tracker + start timer + first tick
-    except Exception:                                      # noqa: BLE001
+    except Exception as exc:                               # noqa: BLE001
         # Never leave the interval + state listeners registered if the first
         # tick raised — that would orphan a timer ticking a half-built engine.
         await coordinator.engine.async_stop()
-        raise ConfigEntryNotReady("Dreame Scheduler failed to start")
+        raise ConfigEntryNotReady("Dreame Scheduler failed to start") from exc
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

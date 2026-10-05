@@ -78,16 +78,17 @@
         <div class="field"><label>Week starts on</label><span class="control"><select data-opt="week_start_day" data-weekdays></select></span></div>
       </div>
 
-      <div class="card" style="opacity:.6">
-        <h2>🧭 Edge clean <span class="pill">temporarily disabled</span></h2>
-        <p class="hint"><b>Edge clean is turned off while it's reworked.</b> The current version does a full-room clean (and mops) instead of a true wall-edge pass, so it's disabled to avoid confusion. A proper wall-strip version is coming. The settings below are inert for now.</p>
+      <div class="card">
+        <h2>🧭 Edge clean</h2>
+        <p class="hint">Zone-cleans <b>thin strips along each room's walls</b>, so the robot traces the perimeter instead of filling the room. Sweeps only by default (dry edges). A whole small home runs as one task.</p>
         <div class="field"><label>Edge clean on a schedule</label><span class="control" data-toggle="edge_enabled"></span></div>
-        <div class="field"><label>Every</label><span class="control"><input type="number" min="0" max="60" step="1" data-opt="edge_every_days" disabled> days <span class="desc">0 = off</span></span></div>
-        <div class="field"><label>At</label><span class="control"><input type="time" data-opt="edge_time" disabled></span></div>
-        <div class="field"><label>Passes</label><span class="control"><input type="number" min="1" max="3" step="1" data-opt="edge_passes" disabled> <span class="desc">laps per room (loop the edges)</span></span></div>
-        <div class="field"><label>Self-tune from normal cleans</label><span class="control" data-toggle="edge_learn"></span> <span class="desc">learns each room's size so the edge cut adapts (beta)</span></div>
+        <div class="field"><label>Every</label><span class="control"><input type="number" min="0" max="60" step="1" data-opt="edge_every_days"> days <span class="desc">0 = off</span></span></div>
+        <div class="field"><label>At</label><span class="control"><input type="time" data-opt="edge_time"></span></div>
+        <div class="field"><label>Strip width</label><span class="control"><input type="number" min="100" max="600" step="10" data-opt="edge_strip_mm"> mm <span class="desc">band along each wall (~robot width)</span></span></div>
+        <div class="field"><label>Passes</label><span class="control"><input type="number" min="1" max="3" step="1" data-opt="edge_passes"> <span class="desc">times over the strips</span></span></div>
+        <div class="field"><label>Sweep only (never mop)</label><span class="control" data-toggle="edge_no_mop"></span> <span class="desc">keep the edges dry</span></div>
         <div class="stack" style="margin-top:8px">
-          <button type="button" class="btn ghost" data-action="edge_clean" disabled title="Edge clean is temporarily disabled while it's reworked">🧭 Edge clean now (disabled)</button>
+          <button type="button" class="btn ghost" data-action="edge_clean">🧭 Edge clean now</button>
         </div>
       </div>
 

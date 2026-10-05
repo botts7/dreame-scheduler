@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.0
+
+- **Add-on brought up to date with the integration.** The store copy had been
+  stuck at 0.3.4, so the per-room controls added in 0.4 and 0.5 never appeared in
+  the panel. They are here now: the **Mop cadence** dropdown (including "Never",
+  sweep only, for all-rug rooms), the **Extra times** editor (clean a room more
+  than once a day, with a "vacuum only" tick per time), and the holiday-pause,
+  opportunistic catch-up and stale-tracker options. The per-room ones live behind
+  a room's gear (settings) button on the Rooms tab.
+- Paired integration 0.6.0 adds **multi-floor / multi-map support (beta)** for a
+  single robot with several saved maps: each map keeps its own schedule and its
+  own cleaned and pending tracking.
+- Edge clean stays disabled pending a proper wall-geometry rework (unchanged from
+  0.5.3).
+
 ## 0.5.1
 
 Paired with integration 0.5.x.

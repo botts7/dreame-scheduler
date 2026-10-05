@@ -19,6 +19,12 @@ from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 
+from .scheduler import (
+    active_map_key,
+    is_flat_rooms,
+    migrate_rooms_to_maps,
+    rooms_for_map,
+)
 from .const import (
     CONF_PREFIX,
     CONF_VACUUM_ENTITY,
@@ -58,6 +64,7 @@ from .const import (
     DEFAULT_EDGE_TIME,
     DEFAULT_EDGE_STRIP_MM,
     DEFAULT_EDGE_PASSES,
+    DEFAULT_EDGE_NO_MOP,
     DEFAULT_EDGE_LEARN,
     DEFAULT_REQUIRE_AWAY,
     DEFAULT_RESUME_WHEN_AWAY,
@@ -101,6 +108,7 @@ from .const import (
     OPT_EDGE_TIME,
     OPT_EDGE_STRIP_MM,
     OPT_EDGE_PASSES,
+    OPT_EDGE_NO_MOP,
     OPT_EDGE_LEARN,
     OPT_MANUAL_CLEAN_ENABLED,
     OPT_MANUAL_CLEAN_MIN_MISSES,
@@ -189,6 +197,7 @@ _DEFAULTS: dict = {
     OPT_EDGE_TIME: DEFAULT_EDGE_TIME,
     OPT_EDGE_STRIP_MM: DEFAULT_EDGE_STRIP_MM,
     OPT_EDGE_PASSES: DEFAULT_EDGE_PASSES,
+    OPT_EDGE_NO_MOP: DEFAULT_EDGE_NO_MOP,
     OPT_EDGE_LEARN: DEFAULT_EDGE_LEARN,
     OPT_DEFAULT_MODE: "",
     OPT_DEFAULT_SUCTION: "",
@@ -235,6 +244,7 @@ _VALIDATORS: dict = {
     OPT_EDGE_TIME: _HHMM,
     OPT_EDGE_STRIP_MM: vol.All(vol.Coerce(int), vol.Range(min=100, max=600)),
     OPT_EDGE_PASSES: vol.All(vol.Coerce(int), vol.Range(min=1, max=3)),
+    OPT_EDGE_NO_MOP: bool,
     OPT_EDGE_LEARN: bool,
     OPT_STUDIO_ENABLED: bool, OPT_PRERUN_ENABLED: bool,
     OPT_MANUAL_CLEAN_ENABLED: bool, OPT_MANUAL_CLEAN_NOTIFY: bool,
@@ -309,13 +319,21 @@ def async_register_config_services(hass: HomeAssistant) -> None:
         if entry is None:
             return {"found": False, "options": {}}
         prefix = entry.data[CONF_PREFIX]
+        # Multi-floor: the room entities reflect the robot's currently-selected
+        # map, so expose that map's room slice as a flat {seg: cfg} (the add-on
+        # edits one map at a time; set_config merges it back). `map`/`maps` let
+        # the UI show which floor is being edited. Single-map -> "default".
+        map_key = active_map_key(_sval(f"select.{prefix}_selected_map"))
+        map_options = _select_options(prefix, "selected_map")
+        opts = dict(entry.options)
+        opts[OPT_ROOMS] = rooms_for_map(opts.get(OPT_ROOMS, {}) or {}, map_key)
         return {
             "found": True,
             "entry_id": entry.entry_id,
             "title": entry.title,
             "vacuum": entry.data.get(CONF_VACUUM_ENTITY),
             "prefix": prefix,
-            "options": dict(entry.options),
+            "options": opts,
             "defaults": _DEFAULTS,
             "rooms": _discover_rooms(prefix),
             "modes": _select_options(prefix, "cleaning_mode"),
@@ -323,6 +341,8 @@ def async_register_config_services(hass: HomeAssistant) -> None:
             "weekdays": WEEKDAYS,
             "scheduler_entities": _scheduler_entities(entry),
             "map_camera": f"camera.{prefix}_map",
+            "map": map_key,
+            "maps": map_options,
         }
 
     async def _async_set_config(call: ServiceCall) -> None:
@@ -345,6 +365,18 @@ def async_register_config_services(hass: HomeAssistant) -> None:
             clean[key] = val
         if not clean:
             return
+        # Multi-floor: the add-on posts the active map's rooms as a flat
+        # {seg: cfg}. Merge it into the nested {map: {seg: cfg}} at the selected
+        # map's key so the OTHER maps' schedules survive. A payload that's already
+        # nested (a map-aware caller) is stored as-is.
+        if OPT_ROOMS in clean:
+            posted = clean.get(OPT_ROOMS) or {}
+            if is_flat_rooms(posted) or not posted:
+                prefix = entry.data[CONF_PREFIX]
+                map_key = active_map_key(_sval(f"select.{prefix}_selected_map"))
+                full = migrate_rooms_to_maps(dict(entry.options.get(OPT_ROOMS, {}) or {}))
+                full[map_key] = posted
+                clean[OPT_ROOMS] = full
         # entry.options is replaced wholesale with the merge; the update
         # listener (_async_options_updated) reloads the entry so the engine
         # re-reads the new config.

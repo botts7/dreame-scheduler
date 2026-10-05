@@ -100,9 +100,10 @@ OPT_CONSUMABLE_THRESHOLD: Final = "consumable_threshold"  # int %: alert at/belo
 OPT_EDGE_ENABLED: Final = "edge_enabled"                 # bool: run a dedicated edge clean on a cadence
 OPT_EDGE_EVERY_DAYS: Final = "edge_every_days"           # int: edge-clean every N days (0 = off)
 OPT_EDGE_TIME: Final = "edge_time"                       # "HH:MM" the scheduled edge run fires
-OPT_EDGE_STRIP_MM: Final = "edge_strip_mm"               # DEPRECATED (old wall-strip approach); unused
-OPT_EDGE_PASSES: Final = "edge_passes"                   # int 1-3: perimeter laps per room (loop the edges)
-OPT_EDGE_LEARN: Final = "edge_learn"                     # bool: self-tune the edge cut from observed room areas
+OPT_EDGE_STRIP_MM: Final = "edge_strip_mm"               # int mm: width of each wall strip zone-cleaned
+OPT_EDGE_PASSES: Final = "edge_passes"                   # int 1-3: zone-clean repeats over the strips
+OPT_EDGE_NO_MOP: Final = "edge_no_mop"                   # bool: edge clean sweeps only (never mop)
+OPT_EDGE_LEARN: Final = "edge_learn"                     # DEPRECATED (self-tune of the removed time-cut); unused
 
 # Defaults applied to rooms that don't override
 OPT_DEFAULT_MODE: Final = "default_mode"             # cleaning-mode select option string
@@ -189,9 +190,10 @@ DEFAULT_CONSUMABLE_THRESHOLD: Final = 10  # percent remaining life
 DEFAULT_EDGE_ENABLED: Final = False      # opt-in: dedicated edge clean off by default
 DEFAULT_EDGE_EVERY_DAYS: Final = 7       # weekly, if enabled
 DEFAULT_EDGE_TIME: Final = "11:00"
-DEFAULT_EDGE_STRIP_MM: Final = 250       # DEPRECATED (old wall-strip approach); unused
-DEFAULT_EDGE_PASSES: Final = 1           # one perimeter lap per room; opt-in up to 3
-DEFAULT_EDGE_LEARN: Final = True         # on by default; self-tunes but unproven, so it's toggleable
+DEFAULT_EDGE_STRIP_MM: Final = 250       # ~one robot width band along each wall
+DEFAULT_EDGE_PASSES: Final = 1           # zone-clean the strips once; opt-in up to 3
+DEFAULT_EDGE_NO_MOP: Final = True        # edge clean sweeps only by default (dry edges)
+DEFAULT_EDGE_LEARN: Final = True         # DEPRECATED (self-tune of the removed time-cut); unused
 DEFAULT_VACUUM_BEFORE_MOP: Final = False
 DEFAULT_HONOR_NATIVE: Final = True      # respect the robot's own per-room settings by default
 DEFAULT_ROOM_MOP_EVERY: Final = 1       # per-room mop cadence: 1 = mop on every clean (off)
@@ -259,6 +261,7 @@ def room_entity(domain: str, prefix: str, seg: int | str, field: str) -> str:
 # Dreame service used to start segment cleaning.
 DREAME_DOMAIN: Final = "dreame_vacuum"
 SERVICE_CLEAN_SEGMENT: Final = "vacuum_clean_segment"
+SERVICE_CLEAN_ZONE: Final = "vacuum_clean_zone"
 
 # Max segment index the Tasshack integration exposes (room_1..room_15).
 MAX_SEGMENTS: Final = 15
