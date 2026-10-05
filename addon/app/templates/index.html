@@ -78,7 +78,9 @@
         <div class="field"><label>Week starts on</label><span class="control"><select data-opt="week_start_day" data-weekdays></select></span></div>
       </div>
 
-      <div class="card">
+      <!-- Edge clean is disabled in the integration (pending a wall-geometry rework),
+           so this card would be a no-op. Hidden until the feature is functional again. -->
+      <div class="card" hidden>
         <h2>🧭 Edge clean</h2>
         <p class="hint">Zone-cleans <b>thin strips along each room's walls</b>, so the robot traces the perimeter instead of filling the room. Sweeps only by default (dry edges). A whole small home runs as one task.</p>
         <div class="field"><label>Edge clean on a schedule</label><span class="control" data-toggle="edge_enabled"></span></div>

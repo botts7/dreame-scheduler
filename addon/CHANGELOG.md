@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.1
+
+- Hide the **Edge clean** card. Edge clean is disabled in the integration pending
+  a wall-geometry rework, so the card was a no-op; it's hidden until the feature
+  works again. No other changes.
+
 ## 0.6.0
 
 - **Add-on brought up to date with the integration.** The store copy had been

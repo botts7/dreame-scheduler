@@ -221,3 +221,26 @@ change to the pure `scheduler` logic beyond taking a map-scoped state slice.
 **Open questions (asked RickDangerous):** how many maps, is `multi_floor_map` or
 `intelligent_recognition` enabled, manual vs auto map switch, one robot or one per
 floor.
+
+---
+
+## 6. Smarter "away from dock" alert for multi-floor finishes (planned)
+
+**Request:** on a two-floor setup, when the robot finishes the upper floor it
+returns to its starting position (the dock is on another floor), and after a short
+while the away-from-dock watchdog fires a false "stranded" alert. It should only
+alert when the robot is genuinely stuck during active cleaning, not when it is idle
+and parked after finishing. (HA community thread, RickDangerous, X40 Ultra.)
+
+**Root cause:** the "can't get home" / away-from-dock watchdog assumes a run ends
+back on the dock. On a multi-floor home the dock may be on a different floor than
+the one just cleaned, so a completed run that parks at its start position looks
+like a stranded robot.
+
+**Design:** gate the alert on the run actually being in progress (or a genuine
+return-trip failure), not on "docked is false" once a run has finished and the
+robot is idle. Reuse the run state the engine already tracks: `active_run` is None
+plus robot idle plus no error means finished-and-parked, not stranded. Sensible
+regardless of floors, and especially relevant with multi-map.
+
+**Effort:** small. One condition in the no-progress / stranded watchdog.
