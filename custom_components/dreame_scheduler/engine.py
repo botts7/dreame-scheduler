@@ -13,6 +13,7 @@ any robot the Tasshack ``dreame_vacuum`` integration exposes.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import re
@@ -342,12 +343,20 @@ DOCK_RADIUS_MM = 600               # within this of the charger counts as "home"
 # then wedged, with no alert. Longer than the others so it's a clean backstop.
 NO_PROGRESS_SECONDS = 480
 CONSUMABLE_CHECK_INTERVAL = 1800   # seconds between wear-part life checks (they change slowly)
-# Edge clean zone-cleans thin strips along each room's walls (scheduler.edge_zones_for_box),
-# batched to the firmware's per-task zone cap so a whole small home is one task.
-# DISABLED again: strips are computed from each room's bounding BOX, which for a
-# non-rectangular room (e.g. a long Entrance corridor) overlaps its NEIGHBOURS — so
-# it cleaned the wrong room. Needs the real room polygon (or native edge cleaning),
-# not a bounding box. Kept dormant behind this flag pending that.
+# Edge clean builds thin strips along each room's REAL walls (the dreame_vacuum map's
+# walls_v3 geometry, read via dreame_mapdata + shaped by edge_geometry). The GEOMETRY
+# is correct (thin per-wall bands, verified live), but driving it through
+# `vacuum_clean_zone` does NOT yield edges-only on this robot:
+#   - a single zone task with many scattered strips cleans the whole REGION spanning
+#     them (bounding box ≈ the room): live 2026-10-05, Main Room's 8.8m² of bands
+#     cleaned ~20m² (whole room). Confirmed twice, with auto_recleaning on AND off.
+#   - a single lone zone couldn't be verified (obstacles aborted it), and 12+ separate
+#     one-wall tasks per room would be impractical + fragile + wash the mop pads each
+#     time; sweep-only also still washes pads (needs pad UNMOUNT for truly dry edges).
+# So edge clean stays DISABLED pending a genuinely different mechanism (firmware native
+# edge mode, or per-wall + pad-unmount + obstacle handling). The reader/probe + pure
+# geometry stay in the tree as the foundation if that ever lands. See memory
+# [[edge-clean-rework]] / [[dreame-map-pixeltype-walls]].
 EDGE_CLEAN_DISABLED = True
 EDGE_MAX_ZONES = 32               # firmware cap on rectangles per vacuum_clean_zone task
 EDGE_START_SECONDS = 90            # after dispatching a batch, wait this long for the robot to
@@ -1079,41 +1088,53 @@ class SchedulerEngine:
 
     async def _start_edge_run(self, segments, *, manual: bool) -> bool:
         """Begin a dedicated edge clean: ZONE-clean thin strips hugging each room's
-        walls (via ``dreame_vacuum.vacuum_clean_zone``), so the robot only cleans the
-        perimeter band and never fills the room. Sweep-only by default (dry edges).
-        Batched to the firmware zone cap; a whole small home is one task. Returns True
-        if a run started."""
+        REAL walls (the dreame_vacuum map's walls_v3 geometry, read via
+        ``dreame_mapdata`` and shaped by ``edge_geometry``), so the robot only cleans
+        the perimeter band -- never filling the room and never crossing an open
+        doorway into a neighbour (the old bounding-box strips did both). Sweep-only by
+        default (dry edges), batched to the firmware zone cap.
+
+        REQUIRES real wall geometry: if the active map carries none, edge clean stays
+        off rather than falling back to the box strips. Returns True if a run started."""
         if EDGE_CLEAN_DISABLED:
-            _LOGGER.info("edge clean is disabled (bounding-box strips clean neighbouring rooms; needs a room-polygon rework)")
+            _LOGGER.info("edge clean is disabled (kill switch)")
             return False
         if self.tracker.active_run is not None or self.tracker.edge_run is not None:
             return False
-        boxes = [(str(s), self._room_box(s)) for s in segments]
-        boxes = [(s, b) for s, b in boxes if b is not None]
+        from .dreame_mapdata import read_geometry, edge_strips_for_segments
         width = self._opt_int(OPT_EDGE_STRIP_MM, DEFAULT_EDGE_STRIP_MM)
-        batches = batch_edge_zones(boxes, width, cap=EDGE_MAX_ZONES)
-        if not batches:
-            _LOGGER.info("edge: no rooms with map geometry to edge-clean")
+        geom = read_geometry(self.hass, self._vacuum_entity)
+        batches, source = edge_strips_for_segments(geom, segments, width, cap=EDGE_MAX_ZONES)
+        if source != "walls" or not batches:
+            _LOGGER.info("edge: no real wall geometry (walls_v3) for these rooms — "
+                         "edge clean stays off (no box-strip fallback)")
             return False
+        walls = geom.get("walls") or {}
+        n_rooms = 0
+        for s in segments:
+            try:
+                if int(s) in walls:
+                    n_rooms += 1
+            except (TypeError, ValueError):
+                pass
         sweep_only = bool(self._opt(OPT_EDGE_NO_MOP, DEFAULT_EDGE_NO_MOP))
         run = {
-            "batches": batches, "i": 0, "rooms": len(boxes),
+            "batches": batches, "i": 0, "rooms": n_rooms, "source": source,
             "sweep_only": sweep_only,
             "repeats": max(1, min(3, self._opt_int(OPT_EDGE_PASSES, DEFAULT_EDGE_PASSES))),
             "started": dt_util.now().isoformat(), "dispatched_at": None,
             "seen_cleaning": False, "stopped_since": None,
             "start_retries": 0, "manual": bool(manual),
         }
-        if sweep_only:
-            await self._edge_set_sweep_mode()   # global mode -> sweep; recorded in edge_restore
+        await self._edge_prepare_settings(sweep_only)
         await self.tracker.async_set_edge_run(run)
         await self._edge_dispatch_batch(run, dt_util.now())
         if bool(self._opt(OPT_NOTIFY_STUCK, DEFAULT_NOTIFY_STUCK)):
             dry = " (sweep only)" if sweep_only else ""
-            await self._notify("🧭 Edge clean started",
-                               f"Tracing the wall edges of {len(boxes)} room(s){dry}.")
-        _LOGGER.info("edge run started: %d room(s), %d batch(es), sweep_only=%s",
-                     len(boxes), len(batches), sweep_only)
+            await self._notify("Edge clean started",
+                               f"Tracing the wall edges of {n_rooms} room(s){dry}.")
+        _LOGGER.info("edge run started: %d room(s), %d strip(s), %d batch(es), sweep_only=%s, source=%s",
+                     n_rooms, sum(len(b) for b in batches), len(batches), sweep_only, source)
         return True
 
     async def _check_edge_run(self, now: datetime, away_ok: bool) -> None:
@@ -1210,22 +1231,132 @@ class SchedulerEngine:
                 return o
         return None
 
-    async def _edge_set_sweep_mode(self) -> None:
-        """Force the global cleaning mode to sweep-only for the edge run, remembering
-        the previous value so _apply_pending_edge_restore puts it back once the robot
-        re-docks. Zone cleaning uses the global mode, so this keeps the edges dry."""
-        ent = entity_of("select", self._prefix, SUF_CLEANING_MODE)
-        st = self.hass.states.get(ent)
-        if st is None or str(st.state).lower() in _UNAVAILABLE:
-            return
-        sweep = self._pick_sweep_mode(st.attributes.get("options"))
-        if sweep is None or st.state == sweep:
-            return
-        # customized_cleaning False here means "don't touch it on restore" — we only
-        # change the global mode, not the per-room customized switch.
-        await self.tracker.async_set_edge_restore(
-            {"cleaning_mode": st.state, "customized_cleaning": False})
-        await self._select(ent, sweep)
+    async def _edge_prepare_settings(self, sweep_only: bool) -> None:
+        """Set the robot up for a single, clean edge lap and remember what to put back
+        (via edge_restore / _apply_pending_edge_restore once it re-docks):
+
+          - auto_recleaning OFF (ALWAYS): a zone-clean of the wall strips otherwise
+            triggers the robot's own second re-clean lap, which doubles the run time
+            and makes it criss-cross the whole room (seen live 2026-10-05 on Main Room:
+            a full 2nd pass was under way at the stop). One lap is the whole point of
+            an edge pass.
+          - sweep-only cleaning mode when configured, so the edges stay dry.
+
+        Records only the settings it actually changed, as a single merged edge_restore
+        dict. ``customized_cleaning: False`` tells the restore not to touch that switch."""
+        restore = {"customized_cleaning": False}
+
+        arc_ent = entity_of("select", self._prefix, "auto_recleaning")
+        arc = self.hass.states.get(arc_ent)
+        if arc and str(arc.state).lower() not in _UNAVAILABLE and str(arc.state).lower() != "off":
+            restore["auto_recleaning"] = arc.state
+            await self._set_select_safe(arc_ent, "off")
+
+        if sweep_only:
+            cm_ent = entity_of("select", self._prefix, SUF_CLEANING_MODE)
+            cm = self.hass.states.get(cm_ent)
+            if cm and str(cm.state).lower() not in _UNAVAILABLE:
+                sweep = self._pick_sweep_mode(cm.attributes.get("options"))
+                if sweep is not None and cm.state != sweep:
+                    restore["cleaning_mode"] = cm.state
+                    await self._set_select_safe(cm_ent, sweep)
+
+        if len(restore) > 1:          # changed something -> arrange to put it back
+            await self.tracker.async_set_edge_restore(restore)
+
+    async def async_dump_map_geometry(self) -> dict:
+        """READ-ONLY probe: inspect the dreame_vacuum MapData for the real per-room
+        wall geometry edge clean could use (the firmware's own ``walls`` and the
+        ``pixel_type`` border band), and report what's there. Dispatches NO clean.
+
+        Posts a persistent-notification summary and returns the same data, so we can
+        confirm the geometry and its UNITS on a live box (do the wall coords sit
+        inside the room boxes, i.e. map mm, or look like grid indices?) before edge
+        clean is re-enabled on the real-wall path."""
+        from .dreame_mapdata import read_geometry, edge_strips_for_segments
+
+        geom = read_geometry(self.hass, self._vacuum_entity)
+        if not geom.get("present"):
+            msg = f"No map geometry available ({geom.get('reason')})."
+            await self._notify("Edge geometry probe", msg)
+            return {"vacuum": self._vacuum_entity, **geom}
+
+        dims = geom.get("dims") or {}
+        segs = geom.get("segments") or {}
+        walls = geom.get("walls") or {}
+        border = geom.get("border_bbox") or {}
+        width = self._opt_int(OPT_EDGE_STRIP_MM, DEFAULT_EDGE_STRIP_MM)
+        seg_ids = list(segs.keys()) or list(walls.keys())
+        batches, source = edge_strips_for_segments(geom, seg_ids, width)
+        strip_total = sum(len(b) for b in batches)
+
+        lines = [
+            f"grid_size={dims.get('grid_size')}mm left={dims.get('left')} "
+            f"top={dims.get('top')} size={dims.get('width')}x{dims.get('height')}",
+            f"segments={len(segs)} walls_segments={len(walls)} "
+            f"wall_lines={geom.get('wall_count')} has_pixel_type={geom.get('has_pixel_type')}",
+            f"strips(source={source})={strip_total} in {len(batches)} batch(es) "
+            f"at width={width}mm",
+        ]
+        for sid in seg_ids[:4]:
+            name = segs.get(sid, ("?",))[0]
+            box = segs.get(sid, (None, None))[1]
+            wl = walls.get(sid) or []
+            lines.append(
+                f"  seg {sid} '{name}': box={box} walls={len(wl)} "
+                f"first_wall={wl[0] if wl else None} border_bbox={border.get(sid)}"
+            )
+        summary = "\n".join(lines)
+        _LOGGER.info("edge geometry probe (%s):\n%s", self._vacuum_entity, summary)
+        await self._notify("Edge geometry probe", summary)
+
+        result = {
+            "vacuum": self._vacuum_entity, "dims": dims, "source": source,
+            "strip_total": strip_total, "batches": len(batches),
+            "segments": len(segs), "wall_segments": len(walls),
+            "wall_lines": geom.get("wall_count"),
+            "has_pixel_type": geom.get("has_pixel_type"), "summary": summary,
+        }
+        # Also drop a full JSON artifact in /config so the raw geometry (every
+        # segment's box, walls, the computed clean-zone STRIPS and their coverage)
+        # can be inspected directly -- the service response isn't easy to read back
+        # over the HA API, and the strip coverage is what we diagnose over-cleaning with.
+        from .edge_geometry import merge_colinear_walls, strips_from_walls
+
+        def _rect_area_m2(r):
+            return abs((r[2] - r[0]) * (r[3] - r[1])) / 1_000_000.0
+
+        per_segment = {}
+        for sid in seg_ids:
+            wl = walls.get(sid) or []
+            box = segs.get(sid, (None, None))[1]
+            box_area = abs((box[2] - box[0]) * (box[3] - box[1])) / 1_000_000.0 if box else None
+            merged = merge_colinear_walls(wl)
+            strips = strips_from_walls(merged, width)
+            # A wall with BOTH dx and dy significant is diagonal -- strip_from_segment
+            # approximates it as a full-span band, which can blanket the interior.
+            diagonal = sum(1 for w in wl if min(abs(w[2] - w[0]), abs(w[3] - w[1])) > 60)
+            strip_area = sum(_rect_area_m2(r) for r in strips)
+            per_segment[str(sid)] = {
+                "name": segs.get(sid, ("?",))[0],
+                "box": box,
+                "box_area_m2": round(box_area, 2) if box_area is not None else None,
+                "walls": len(wl),
+                "diagonal_walls": diagonal,
+                "merged_walls": len(merged),
+                "strips": len(strips),
+                "strip_area_m2": round(strip_area, 2),
+                "coverage_pct": round(100 * strip_area / box_area) if box_area else None,
+                "rects": strips,
+            }
+        detail = {**result, "per_segment": per_segment}
+        try:
+            path = self.hass.config.path("dreame_edge_probe.json")
+            await self.hass.async_add_executor_job(_write_json, path, detail)
+            _LOGGER.info("edge geometry probe written to %s", path)
+        except Exception as exc:  # noqa: BLE001 — diagnostic artifact is best-effort
+            _LOGGER.warning("edge geometry probe: could not write artifact: %s", exc)
+        return result
 
     def _cleaning_time_min(self) -> float | None:
         """The robot's own current-task cleaning time (minutes) — counts ACTUAL
@@ -1340,6 +1471,18 @@ class SchedulerEngine:
             cur = self.hass.states.get(ent)
             if not (cur and cur.state == "on"):
                 return                                 # didn't take — leave pending, retry
+        # The mode / auto-reclean SELECTS read 'unavailable' while the robot is charging.
+        # Don't consume the pending marker until they're actually settable, or the
+        # restore silently no-ops and leaves the robot on edge settings (seen live
+        # 2026-10-05: cleaning mode left on Sweeping because it was cleared mid-charge).
+        def _sel_ready(suffix: str) -> bool:
+            s = self.hass.states.get(entity_of("select", self._prefix, suffix))
+            return s is not None and str(s.state).lower() not in _UNAVAILABLE
+
+        if pend.get("auto_recleaning") and not _sel_ready("auto_recleaning"):
+            return
+        if pend.get("cleaning_mode") and not _sel_ready(SUF_CLEANING_MODE):
+            return
         if pend.get("auto_recleaning"):
             await self._set_select_safe(
                 entity_of("select", self._prefix, "auto_recleaning"), pend["auto_recleaning"])
@@ -4005,6 +4148,12 @@ def _parse_iso(value: str | None) -> datetime | None:
         return dt_util.parse_datetime(value)
     except (TypeError, ValueError):
         return None
+
+
+def _write_json(path: str, data: dict) -> None:
+    """Write a diagnostic artifact (runs in an executor, off the event loop)."""
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2, default=str)
 
 
 def _plain_attr(v):

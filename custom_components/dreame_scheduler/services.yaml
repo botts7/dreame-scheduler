@@ -201,3 +201,21 @@ get_report:
         entity:
           integration: dreame_vacuum
           domain: vacuum
+
+dump_map_geometry:
+  name: Dump map geometry (edge-clean probe)
+  description: >-
+    Read-only diagnostic. Inspects the dreame_vacuum map for the real per-room
+    wall geometry edge clean can use (the firmware's own walls and the pixel_type
+    border band) and posts a summary notification. Dispatches no clean. Used to
+    confirm the geometry and its units before edge clean is re-enabled.
+  fields:
+    vacuum:
+      name: Vacuum
+      description: Target a specific robot in a multi-vacuum home.
+      required: false
+      example: vacuum.dreamebot_l20_ultra
+      selector:
+        entity:
+          integration: dreame_vacuum
+          domain: vacuum

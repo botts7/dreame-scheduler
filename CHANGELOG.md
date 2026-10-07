@@ -3,6 +3,21 @@
 All notable changes to the Dreame Scheduler integration and its companion
 add-on are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.6.2] (2026-10-07)
+
+### Integration (`custom_components/dreame_scheduler`)
+- **Fixed: the Cleaning mode and Suction dropdowns came up empty on a docked
+  robot** (showing only "default"). The Cleaning Defaults, Quiet Mode and per-room
+  Mode/Suction pickers read their options from the robot's mode/suction controls,
+  which the Dreame integration reports as "unavailable" whenever the robot is
+  docked — exactly when you set the add-on up. They now fall back to the vacuum
+  entity's own option lists, which stay populated while docked, so the real options
+  (Quiet/Standard/Strong/Turbo, Sweeping/Mopping/…) show up. Thanks to cinadr for
+  the report (add-on issue #1).
+- Behind the scenes: a read-only map-geometry reader and a `dump_map_geometry`
+  diagnostic service, groundwork for a possible future edge-clean rework. Edge
+  clean itself stays disabled; nothing user-facing changes.
+
 ## [0.6.1] (2026-10-05)
 
 ### Integration (`custom_components/dreame_scheduler`)

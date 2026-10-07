@@ -292,6 +292,30 @@ def async_register_config_services(hass: HomeAssistant) -> None:
         st = hass.states.get(f"select.{prefix}_{suffix}")
         return list(st.attributes.get("options", [])) if st else []
 
+    _BAD_OPTS = {"", "unavailable", "unknown", "none"}
+
+    def _opt_options(prefix: str, select_suffix: str, vacuum_id: str | None, list_attr: str) -> list[str]:
+        """Canonical option slugs for a dreame select (cleaning mode / suction level).
+
+        The select entity's own ``options`` ARE the canonical slugs, but the
+        ``dreame_vacuum`` integration blanks them to ``['unavailable']`` whenever the
+        robot is docked — which is exactly when the add-on is configured, so the
+        dropdowns came up empty (add-on issue #1: only "default"/"unknown" on a docked
+        X50; reproduced on the L20 while docked). The VACUUM entity's ``*_list``
+        attribute stays populated while docked, as Title-Case display text, so fall
+        back to it and slugify — the dreame option slug is just ``lower()`` with spaces
+        turned to underscores (e.g. "Sweeping and mopping" -> "sweeping_and_mopping",
+        matching the live select options when the robot is cleaning)."""
+        st = hass.states.get(f"select.{prefix}_{select_suffix}")
+        opts = [o for o in (st.attributes.get("options", []) if st else [])
+                if str(o).strip().lower() not in _BAD_OPTS]
+        if opts:
+            return opts
+        vac = hass.states.get(vacuum_id) if vacuum_id else None
+        lst = (vac.attributes.get(list_attr, []) if vac else []) or []
+        return [str(o).strip().lower().replace(" ", "_") for o in lst
+                if str(o).strip().lower() not in _BAD_OPTS]
+
     def _discover_rooms(prefix: str) -> dict[str, str]:
         rooms: dict[str, str] = {}
         for n in range(1, MAX_SEGMENTS + 1):
@@ -336,8 +360,8 @@ def async_register_config_services(hass: HomeAssistant) -> None:
             "options": opts,
             "defaults": _DEFAULTS,
             "rooms": _discover_rooms(prefix),
-            "modes": _select_options(prefix, "cleaning_mode"),
-            "suctions": _select_options(prefix, "suction_level"),
+            "modes": _opt_options(prefix, "cleaning_mode", entry.data.get(CONF_VACUUM_ENTITY), "cleaning_mode_list"),
+            "suctions": _opt_options(prefix, "suction_level", entry.data.get(CONF_VACUUM_ENTITY), "suction_level_list"),
             "weekdays": WEEKDAYS,
             "scheduler_entities": _scheduler_entities(entry),
             "map_camera": f"camera.{prefix}_map",

@@ -129,6 +129,12 @@ def _async_register_services(hass: HomeAssistant) -> None:
         for eng in _engines(call):
             await eng.async_show_unreachable(str(seg) if seg is not None else None)
 
+    async def _dump_map_geometry(call: ServiceCall) -> dict:
+        results = []
+        for eng in _engines(call):
+            results.append(await eng.async_dump_map_geometry())
+        return {"results": results}
+
     quiet_schema = vol.Schema({
         vol.Optional("quiet", default=False): cv.boolean,
         vol.Optional("vacuum"): cv.string,
@@ -152,4 +158,9 @@ def _async_register_services(hass: HomeAssistant) -> None:
     hass.services.async_register(
         DOMAIN, "show_unreachable", _show_unreachable,
         schema=vol.Schema({vol.Optional("segment"): cv.string, vol.Optional("vacuum"): cv.string}),
+    )
+    hass.services.async_register(
+        DOMAIN, "dump_map_geometry", _dump_map_geometry,
+        schema=vol.Schema({vol.Optional("vacuum"): cv.string}),
+        supports_response=SupportsResponse.OPTIONAL,
     )
