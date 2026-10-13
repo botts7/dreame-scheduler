@@ -1902,14 +1902,24 @@ class SchedulerEngine:
         return None
 
     def _at_dock(self, pos: tuple[int, int] | None = None) -> bool:
-        """Is the robot physically AT its dock? MEASURED, never inferred from the
-        state name.
+        """Is the robot physically AT its dock?
 
-        `idle` means "doing nothing" — NOT "at the dock". A robot idle in the
-        middle of the floor is stranded, and treating idle as parked is what made
-        the silent-stuck watchdog skip a genuinely stranded robot while the status
-        line cheerfully claimed it was "paused at the dock" 8 m away (live
-        2026-07-17)."""
+        Trust the `docked` ATTRIBUTE first — it's a firmware fact (the robot is on
+        the charge contacts), unlike the `idle` state NAME, which can mean "stopped
+        in the middle of the floor". This matters on MULTI-FLOOR: switching the
+        selected map leaves `vacuum_position` and `charger_position` in mismatched
+        coordinate frames, so a docked robot measures as far from its dock and used
+        to false-fire the "stranded away from its dock" alert — RD on the forum got
+        it just by switching floors back and forth with the robot sitting docked
+        (2026-10).
+
+        With no docked flag, fall back to MEASURED position vs the charger (an `idle`
+        robot out on the floor is NOT home — that mis-call once let the silent-stuck
+        watchdog skip a genuinely stranded robot, live 2026-07-17), then to the state
+        name only when there are no coordinates to measure with."""
+        st = self.hass.states.get(self._vacuum_entity)
+        if st is not None and st.attributes.get("docked"):
+            return True
         if pos is None:
             pos = self._vacuum_position()
         dock = self._charger_position()

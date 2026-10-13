@@ -3,6 +3,18 @@
 All notable changes to the Dreame Scheduler integration and its companion
 add-on are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.6.3] (2026-10-13)
+
+### Integration (`custom_components/dreame_scheduler`)
+- **Fixed: a false "Vacuum stranded away from its dock" alert after switching
+  floors.** The "am I at the dock?" check measured the robot's position against the
+  charger; on a multi-floor map switch those two sit in different map coordinate
+  frames, so a docked robot measured as far from its dock and the stranded watchdog
+  fired after 15 minutes (the alert even said "state: docked"). It now trusts the
+  robot's own docked flag, so a docked robot is never flagged as stranded. A
+  genuinely stranded (off-dock) robot still alerts. Thanks to RickDangerous for the
+  report.
+
 ## [0.6.2] (2026-10-07)
 
 ### Integration (`custom_components/dreame_scheduler`)
