@@ -3,6 +3,23 @@
 All notable changes to the Dreame Scheduler integration and its companion
 add-on are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.6.4] (2026-11-05)
+
+### Integration (`custom_components/dreame_scheduler`)
+- **New: an alert when a mop pad comes off.** If the robot drops a pad out on the
+  floor (it reports `mop_removed`), the scheduler now sends it back to the dock,
+  tells you which room the pad came off in, and ends the current run. Unfinished
+  rooms stay pending for the catch-up. Before, the robot just sat in error with no
+  alert. Pad detaches at the dock (carpet mode) don't count.
+- **New: scheduled cleans wait for the robot if it's offline.** Cloud-only robots go
+  unavailable when the internet or the Dreame cloud drops. A clean due during an
+  outage used to be "sent" anyway and the day marked done, so those rooms waited
+  for the catch-up. It now holds the clean and sends it as soon as the robot
+  reconnects, then tells you how long it was held (or that it was missed, if the
+  day ran out). Short gaps, like an HA restart, stay silent.
+- The status now says "robot offline or still loading" instead of "waiting for the
+  robot's entities to load".
+
 ## [0.6.3] (2026-10-13)
 
 ### Integration (`custom_components/dreame_scheduler`)

@@ -170,6 +170,8 @@ from .const import (
     room_entity,
 )
 from .consumables import CONSUMABLE_BY_KEY, CONSUMABLES, evaluate_consumables
+from .mop_lost import is_mop_lost, plan_send as mop_lost_plan_send
+from .offline_hold import OFFLINE_REASON, hold_notice, robot_online
 from .scheduler import (
     advance_mop_cadence,
     active_map_key,
@@ -460,6 +462,14 @@ class SchedulerEngine:
         self._stranded_pos: tuple[int, int] | None = None
         self._stranded_since: datetime | None = None
         self._stranded_notified = False
+        # Mop-pad-lost episode (see _watch_mop_lost): where the pad came off, how
+        # many send-homes we've issued and when, and whether the user's been told.
+        # Lives on the engine (not the run) so it spans run and no-run ticks.
+        self._mop_lost: dict | None = None
+        # A scheduled dispatch held because the robot was offline (see
+        # offline_hold.py): {"since", "day", "back"}. Resolved with a notice once
+        # the held clean goes out, or as missed once that day has passed.
+        self._offline_hold: dict | None = None
         # A high-priority "needs help" alert has fired and not yet been resolved —
         # set True by any rescue notify, cleared with an "all clear" once the robot
         # has recovered and made it back to the dock (see _maybe_all_clear).
@@ -1019,6 +1029,79 @@ class SchedulerEngine:
             )
         self._set_status("error", f"can't set up at the dock — {raw}")
         return True
+
+    async def _watch_mop_lost(self, now: datetime, run: dict | None = None) -> bool:
+        """A mop pad came off out on the floor (robot in error with 'mop_removed').
+
+        Send the robot home (one retry if it's still errored), tell the user ONCE
+        where the pad is, and end any run in flight. The run's unfinished rooms stay
+        pending for the catch-up rather than the resume queue: resuming would only
+        drop the job again until the pad is refitted. Runs with or without an active
+        run (live 2026-10-27 the pad came off while the robot was already returning).
+
+        Returns True while it owns the robot this tick, so other watchdogs stand
+        down; after the last send-home has had its window it hands back, so the
+        stranded watchdog can still escalate a robot that never left."""
+        ep = self._mop_lost
+        at_dock = self._at_dock()
+        if not is_mop_lost(self._vacuum_state(), self._error_text(), at_dock):
+            # The episode spans the robot flapping error/returning on its way home;
+            # it ends once it's docked (or after an hour, as a safety net).
+            if ep is not None and (at_dock or (now - ep["since"]).total_seconds() > 3600):
+                self._mop_lost = None
+            return False
+
+        if ep is None:
+            pos = self._vacuum_position()
+            where = self._sval(entity_of("sensor", self._prefix, "current_room")) or "somewhere"
+            ep = self._mop_lost = {"since": now, "where": where, "pos": pos,
+                                   "sends": 0, "last_send": None, "notified": False}
+
+        since_send = (now - ep["last_send"]).total_seconds() if ep["last_send"] else None
+        send_now, keep_owning = mop_lost_plan_send(ep["sends"], since_send)
+        if send_now:
+            await self._svc("vacuum", "return_to_base", {"entity_id": self._vacuum_entity})
+            ep["sends"] += 1
+            ep["last_send"] = now
+            _LOGGER.info("mop pad lost near %s: sent home (attempt %s)", ep["where"], ep["sends"])
+
+        # End a run in flight (once): its remaining rooms go back to pending.
+        unfinished: list[str] = []
+        if run is not None and self.tracker.active_run is not None:
+            segs = [str(s) for s in run.get("segments", [])]
+            done = self.tracker.cleaned or {}
+            names = run.get("seg_names", {})
+            unfinished = [names.get(s, f"Room {s}") for s in segs if s not in done]
+            await self.tracker.async_set_resume(None)
+            await self.tracker.async_set_last_run({
+                "kind": run.get("kind"), "finished": now.isoformat(), "interrupted": True,
+                "cleaned": [], "remaining": unfinished,
+            })
+            await self.tracker.async_set_active_run(None)
+
+        if not ep["notified"]:
+            ep["notified"] = True
+            self._help_pending = True   # an "all clear" follows once it's back on the dock
+            pos = ep["pos"]
+            await self._log_stuck({
+                "ts": now.isoformat(), "room": ep["where"],
+                "x": pos[0] if pos else None, "y": pos[1] if pos else None,
+                "error": f"mop pad lost ({self._error_text() or 'mop_removed'})",
+                "kind": run.get("kind") if run else "idle", "attempt": 0,
+                "run_id": run.get("started") if run else None, "beached": False,
+            })
+            if bool(self._opt(OPT_NOTIFY_STUCK, DEFAULT_NOTIFY_STUCK)):
+                where = ep["where"]
+                msg = (f"A mop pad came off near {where}, so I've sent the vacuum back to "
+                       f"the dock. The pad should be on the floor around {where}. Pop it "
+                       "back on before the next mop clean.")
+                if unfinished:
+                    msg += (f"\n\nNot finished this run: {', '.join(unfinished)}. They'll be "
+                            "picked up by the catch-up once the pad's back on.")
+                await self._notify("Mop pad came off", msg, high_priority=True)
+
+        self._set_status("error", f"mop pad came off near {ep['where']}, heading home")
+        return keep_owning
 
     # ------------------------------------------------- edge clean (wall strips)
     def _room_box(self, seg):
@@ -1741,6 +1824,11 @@ class SchedulerEngine:
     async def _maybe_auto_recover(self, run: dict, now: datetime) -> bool:
         """Unstick a wedged robot and CARRY ON cleaning, rather than docking.
         Returns True if it handled this tick."""
+        # A mop pad came off out on the floor: nothing here can refit it, and
+        # resuming just drops the job again. Send it home, tell the user where the
+        # pad is, end the run. Checked first so no reverse-out is ever tried.
+        if await self._watch_mop_lost(now, run):
+            return True
         # Dock/station fault (e.g. "mop install failed") — the robot can't get
         # ready to clean and no manoeuvre helps. Tell the user and END the run so
         # it can't wedge the scheduler; handle this before the reverse-out paths.
@@ -2400,6 +2488,13 @@ class SchedulerEngine:
         except Exception as exc:  # noqa: BLE001
             _LOGGER.warning("consumable check failed: %s", exc)
 
+        # 2e) A clean held while the robot was offline: note when it came back,
+        # and report it as missed if that day has gone by.
+        try:
+            await self._track_offline_hold(now)
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning("offline-hold tracking failed: %s", exc)
+
         # 3) A run is in flight → verify/await it; never dispatch concurrently.
         if self.tracker.active_run is not None:
             await self._check_active_run(now, away_ok)
@@ -2411,11 +2506,18 @@ class SchedulerEngine:
             return
 
         # No run in flight — but the robot may still be stranded out there from a
-        # finished/interrupted one. Nothing else watches for that.
+        # finished/interrupted one (or have dropped a mop pad on its way home, or
+        # mid an app-started clean). Nothing else watches for that.
+        mop_lost_owned = False
         try:
-            await self._watch_stranded(now)
+            mop_lost_owned = await self._watch_mop_lost(now)
         except Exception as exc:  # noqa: BLE001
-            _LOGGER.warning("stranded watch failed: %s", exc)
+            _LOGGER.warning("mop-lost watch failed: %s", exc)
+        if not mop_lost_owned:
+            try:
+                await self._watch_stranded(now)
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.warning("stranded watch failed: %s", exc)
 
         # Pre-run tidy heads-up (once/day, at the user's chosen trigger) — best-
         # effort, never let it block the schedule.
@@ -2522,6 +2624,33 @@ class SchedulerEngine:
         return False
 
     # --------------------------------------------------------------- dispatch
+    async def _track_offline_hold(self, now: datetime) -> None:
+        """Bookkeeping for a dispatch held while the robot was offline: note when
+        it came back (so the notice reports the outage, not any presence wait
+        after it), and once that day has passed unresolved, report it as missed."""
+        hold = self._offline_hold
+        if hold is None:
+            return
+        st = self.hass.states.get(self._vacuum_entity)
+        if not robot_online(st.state if st else None):
+            return                       # still offline; nothing to tell yet
+        if hold["back"] is None:
+            hold["back"] = now
+        if hold["day"] != now.date().isoformat():
+            await self._resolve_offline_hold(now, "missed")
+
+    async def _resolve_offline_hold(self, now: datetime, outcome: str) -> None:
+        """Close an offline hold and tell the user how it went (outages only;
+        an HA restart's brief entity load stays silent, see hold_notice)."""
+        hold, self._offline_hold = self._offline_hold, None
+        if hold is None:
+            return
+        held = ((hold["back"] or now) - hold["since"]).total_seconds()
+        _LOGGER.info("offline hold resolved (%s) after %ss", outcome, int(held))
+        msg = hold_notice(held, outcome)
+        if msg and bool(self._opt(OPT_NOTIFY_STUCK, DEFAULT_NOTIFY_STUCK)):
+            await self._notify(msg[0], msg[1])
+
     async def _attempt_dispatch(self, decision, now, now_min, away_ok) -> None:
         today_iso = now.date().isoformat()
         segments = list(decision.segments)
@@ -2537,6 +2666,10 @@ class SchedulerEngine:
         # b) Window + battery + station + robot-idle gates.
         gates_ok, reason = self._start_gates_ok(now_min)
         if not gates_ok:
+            if reason == OFFLINE_REASON and self._offline_hold is None:
+                # Hold the dispatch (the day stays due) until the robot is back.
+                self._offline_hold = {"since": now, "day": today_iso, "back": None}
+                _LOGGER.info("%s dispatch held: robot offline", decision.kind)
             self._set_status("waiting", reason)
             return
 
@@ -2577,10 +2710,19 @@ class SchedulerEngine:
             sweep_only=set(decision.sweep_only) & set(reachable),
         )
         await self._mark_dispatched(decision, today_iso)
+        if self._offline_hold is not None:
+            await self._resolve_offline_hold(
+                now, "running" if self._offline_hold["day"] == today_iso else "missed")
 
     def _start_gates_ok(self, now_min: int) -> tuple[bool, str]:
         """Window + battery + station preconditions for STARTING a clean.
         Presence and door reachability are handled by the caller."""
+        # Robot unreachable (internet / Dreame cloud down, or entities still
+        # loading): every other gate below fails OPEN on missing data, so without
+        # this a clean would be "sent" into the void and its day marked done.
+        st = self.hass.states.get(self._vacuum_entity)
+        if not robot_online(st.state if st else None):
+            return False, OFFLINE_REASON
         win = clean_window.evaluate(
             now_min,
             start=self._opt(OPT_WINDOW_START, DEFAULT_WINDOW_START),
@@ -2863,7 +3005,10 @@ class SchedulerEngine:
         # ~60 s of boot while the robot was still out cleaning. Hold everything
         # until the vacuum entity reports a real state.
         if self._vacuum_state() is None:
-            self._set_status("waiting", "waiting for the robot's entities to load")
+            # Either HA is still loading the robot's entities, or the robot lost its
+            # connection mid-clean (it carries on cleaning on its own; we pick the
+            # run back up and bank it from the completion record once it's back).
+            self._set_status("waiting", "robot offline or still loading, waiting for it to reconnect")
             return
 
         # Safety net: a run that flagged an ERROR but whose robot has since made it
@@ -2930,6 +3075,10 @@ class SchedulerEngine:
                     self._set_status("returning", "someone home — sending back to the dock")
                 else:
                     self._set_status("waiting", "paused (someone home) — will resume when empty")
+                # Dropped a mop pad? Same handling as an active run (send home,
+                # say where the pad is, end the run) rather than the vague alert.
+                if await self._watch_mop_lost(now, run):
+                    return
                 # Stuck while suspended? The normal stuck-notify lives past this
                 # early return, so it never fires for a suspended run — alert here.
                 if self._error_active() and not run.get("notified_stuck"):
