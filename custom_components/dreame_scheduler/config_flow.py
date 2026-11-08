@@ -15,6 +15,7 @@ from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.helpers import selector
 
+from . import weekday_cleaning as weekday_plans
 from .const import (
     CONF_PREFIX,
     CONF_VACUUM_ENTITY,
@@ -234,23 +235,29 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         )
 
     async def async_step_weekly(self, user_input=None):
-        if user_input is not None:
+        errors = {}
+        if user_input is not None and not weekday_plans.required_states_valid(user_input.get(weekday_plans.GUARDS, {})):
+            errors[weekday_plans.GUARDS] = "required_states"
+        elif user_input is not None:
             profiles = {str(i): user_input[day] for i, day in enumerate(WEEKDAYS)
                         if user_input[day] != "inherit"}
             return self._save({OPT_WEEKDAY_PROFILES: profiles,
+                               weekday_plans.DEPARTURE: user_input[weekday_plans.DEPARTURE],
+                               weekday_plans.GUARDS: user_input.get(weekday_plans.GUARDS, {}),
                                OPT_HONOR_NATIVE: user_input[OPT_HONOR_NATIVE],
                                OPT_EXTERNAL_CREDITS: user_input[OPT_EXTERNAL_CREDITS]})
         profiles = self._opt(OPT_WEEKDAY_PROFILES, {})
         choices = selector.SelectSelector(selector.SelectSelectorConfig(options=[
             selector.SelectOptionDict(value="inherit", label="Use scheduler default"),
-            selector.SelectOptionDict(value="rooms", label="Use per-room settings"),
-            selector.SelectOptionDict(value="deep", label="Vacuum before mopping"),
+            *(selector.SelectOptionDict(value=k, label=v) for k, v in weekday_plans.LABELS.items()),
         ]))
         fields = {vol.Required(day, default=profiles.get(str(i), "inherit")): choices
                   for i, day in enumerate(WEEKDAYS)}
         fields[vol.Required(OPT_HONOR_NATIVE, default=self._opt(OPT_HONOR_NATIVE, DEFAULT_HONOR_NATIVE))] = selector.BooleanSelector()
         fields[vol.Required(OPT_EXTERNAL_CREDITS, default=self._opt(OPT_EXTERNAL_CREDITS, False))] = selector.BooleanSelector()
-        return self.async_show_form(step_id="weekly", data_schema=vol.Schema(fields))
+        fields[vol.Required(weekday_plans.DEPARTURE, default=self._opt(weekday_plans.DEPARTURE, False))] = selector.BooleanSelector()
+        fields[vol.Optional(weekday_plans.GUARDS, default=self._opt(weekday_plans.GUARDS, {}))] = selector.ObjectSelector()
+        return self.async_show_form(step_id="weekly", data_schema=vol.Schema(fields), errors=errors)
 
     # -------- general --------
     async def async_step_general(self, user_input=None):

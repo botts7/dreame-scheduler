@@ -24,7 +24,7 @@
           "general": "General (window, guards, catch-up, quiet)",
           "presence": "Presence & notifications",
           "rooms": "Rooms (per-room schedule)",
-          "weekly": "Weekday cleaning & external credits"
+          "weekly": "Weekly cleaning plan"
         }
       },
       "general": {
@@ -110,8 +110,8 @@
         }
       },
       "weekly": {
-        "title": "Weekday cleaning & external credits",
-        "description": "Weekday choices apply to daily and catch-up runs. Vacuum before mopping uses a global mode and requires turning off native room protection. Schedule the rooms you want on each day under Rooms.",
+        "title": "Weekly cleaning plan",
+        "description": "Choose a cleaning type for each day. Whole-home profiles run once on the selected day, even with no rooms assigned. The robot cleans the entire active map using the selected firmware mode. Scheduled-room profiles follow your room assignments and protection settings. Whole-home departure timing uses the away grace period and can start outside the usual cleaning window.",
         "data": {
           "Mon": "Monday",
           "Tue": "Tuesday",
@@ -121,12 +121,17 @@
           "Sat": "Saturday",
           "Sun": "Sunday",
           "honor_native": "Protect native room settings (prevent global mop overrides)",
-          "external_credits": "Credit completed external cleans"
+          "external_credits": "Credit completed external cleans",
+          "whole_home_on_departure": "Start whole-home profiles after everyone leaves that day (instead of at the daily time)",
+          "whole_home_required_states": "Required entity states for whole-home profiles (optional)"
         }
       }
     },
     "abort": {
       "no_rooms": "No rooms found yet. Let the vacuum finish a full map first, then try again."
+    },
+    "error": {
+      "required_states": "Enter entity IDs and their required states as text values."
     }
   }
 }

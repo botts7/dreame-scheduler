@@ -25,6 +25,7 @@ from .scheduler import (
     migrate_rooms_to_maps,
     rooms_for_map,
 )
+from . import weekday_cleaning as weekday_plans
 from .const import (
     CONF_PREFIX,
     CONF_VACUUM_ENTITY,
@@ -202,6 +203,7 @@ _DEFAULTS: dict = {
     OPT_EDGE_NO_MOP: DEFAULT_EDGE_NO_MOP,
     OPT_EDGE_LEARN: DEFAULT_EDGE_LEARN,
     OPT_WEEKDAY_PROFILES: {}, OPT_EXTERNAL_CREDITS: False,
+    weekday_plans.DEPARTURE: False, weekday_plans.GUARDS: {},
     OPT_DEFAULT_MODE: "",
     OPT_DEFAULT_SUCTION: "",
     OPT_QUIET_SUCTION: "",
@@ -229,6 +231,12 @@ _ALLOWED_KEYS = set(_DEFAULTS)
 _HHMM = vol.All(str, vol.Match(r"^\d{1,2}:\d{2}$"))
 _WEEKDAY = vol.All(vol.Coerce(int), vol.Range(min=0, max=6))
 _str_list = [str]
+def _required_states(value):
+    if not weekday_plans.required_states_valid(value):
+        raise vol.Invalid("Expected a mapping of entity IDs to required states")
+    return value
+
+
 _VALIDATORS: dict = {
     OPT_REQUIRE_AWAY: bool, OPT_WINDOW_ENABLED: bool, OPT_WINDOW_OVERRUN: bool,
     OPT_GUARD_DUSTBIN: bool, OPT_GUARD_WATER: bool, OPT_RETURN_ON_ARRIVAL: bool,
@@ -266,7 +274,9 @@ _VALIDATORS: dict = {
     OPT_MIN_BATTERY: vol.All(vol.Coerce(int), vol.Range(min=0, max=100)),
     OPT_STALE_AFTER_DAYS: vol.All(vol.Coerce(int), vol.Range(min=1, max=365)),
     OPT_PRESENCE_ENTITIES: _str_list, OPT_NOTIFY_TARGETS: _str_list,
-    OPT_WEEKDAY_PROFILES: {vol.In(tuple(str(i) for i in range(7))): vol.In(("rooms", "deep"))},
+    OPT_WEEKDAY_PROFILES: {vol.In(tuple(str(i) for i in range(7))): vol.In(weekday_plans.LABELS)},
+    weekday_plans.DEPARTURE: bool,
+    weekday_plans.GUARDS: _required_states,
     OPT_EXTERNAL_CREDITS: bool,
     OPT_DEFAULT_MODE: str, OPT_DEFAULT_SUCTION: str, OPT_QUIET_SUCTION: str,
     OPT_ROOMS: dict, OPT_SHAPES: dict, OPT_MAP_IMAGE: dict, OPT_OVERLAYS: dict,
@@ -368,6 +378,7 @@ def async_register_config_services(hass: HomeAssistant) -> None:
             "modes": _opt_options(prefix, "cleaning_mode", entry.data.get(CONF_VACUUM_ENTITY), "cleaning_mode_list"),
             "suctions": _opt_options(prefix, "suction_level", entry.data.get(CONF_VACUUM_ENTITY), "suction_level_list"),
             "weekdays": WEEKDAYS,
+            "weekday_profile_labels": weekday_plans.LABELS,
             "scheduler_entities": _scheduler_entities(entry),
             "map_camera": f"camera.{prefix}_map",
             "map": map_key,

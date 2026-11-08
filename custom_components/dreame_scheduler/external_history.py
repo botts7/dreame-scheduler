@@ -80,7 +80,7 @@ def owned_by_scheduler(start, windows):
     return any(int(a) <= start <= b for a, b in windows)
 
 
-def apply_session(state, source_id, passes, room_names, timezone):
+def apply_session(state, source_id, passes, room_names, timezone, *, profile=None):
     """Merge once per session, including passes which arrive on separate refreshes."""
     history = state["history"]
     prev = next((r for r in history if r.get("source_id") == source_id), None)
@@ -104,9 +104,12 @@ def apply_session(state, source_id, passes, room_names, timezone):
         swept = any(p["pad"] == "Not installed" for p in items)
         per_room[seg] = {"status": "cleaned", "mode": "sweeping" if swept else None,
                          "will_mop": False if all(p["pad"] == "Not installed" for p in items) else None}
-    row = {"source": SOURCE, "source_id": source_id, "kind": "manual", "map": "default",
+    kind = "daily" if profile else "manual"
+    row = {"source": SOURCE, "source_id": source_id, "kind": kind, "map": "default",
            "ts": local_finish.isoformat(), "weekday": local_finish.weekday(), "passes": merged,
            "timestamp_basis": "last_pass_start_plus_reported_duration", "per_room": per_room}
+    if profile:
+        row["profile"] = profile
     if row == prev:
         return False
     rows = sorted([r for r in history if r is not prev] + [row], key=lambda r: epoch(r["ts"]))[-200:]
@@ -133,7 +136,7 @@ def apply_session(state, source_id, passes, room_names, timezone):
             slot.setdefault("unreachable", {}).pop(seg, None)
             slot.setdefault("manual_clean", {}).pop(seg, None)
     if finish >= epoch((state.get("last_run") or {}).get("finished")):
-        state["last_run"] = {"kind": "manual", "source": SOURCE, "source_id": source_id,
+        state["last_run"] = {"kind": kind, "source": SOURCE, "source_id": source_id,
                              "finished": row["ts"], "cleaned": [room_names.get(s, f"Room {s}") for s in per_room],
                              "skipped": [], "cleaned_area": merged[-1]["area"]}
     return True

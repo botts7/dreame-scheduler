@@ -28,6 +28,7 @@ from homeassistant.helpers.event import (
 from homeassistant.util import dt as dt_util
 
 from . import clean_guards, clean_window, history_analytics as hist_a, trap_learner
+from . import weekday_cleaning as weekday_plans
 from .const import (
     CONF_PREFIX,
     CONF_VACUUM_ENTITY,
@@ -503,6 +504,8 @@ class SchedulerEngine:
         # only (a partial observation on restart just isn't learned — no harm).
         self._area_obs: dict | None = None
         self._external_save_pending = False
+        self._native_retry_after = None
+        self._native_retry_reason = ""
 
     # ------------------------------------------------------------------ setup
     async def async_start(self) -> None:
@@ -520,8 +523,9 @@ class SchedulerEngine:
             )
         )
         watched = [self._vacuum_entity, entity_of("sensor", self._prefix, SUF_ERROR)]
-        if enabled:
+        if enabled or state.get("native_dispatches") or any(weekday_plans.whole_home(p) for p in self._opt(OPT_WEEKDAY_PROFILES, {}).values()):
             watched.append(entity_of("sensor", self._prefix, "cleaning_history"))
+        watched += list(self._opt(weekday_plans.GUARDS, {}))
         watched += [ent for ent in self._presence_entities() if ent]
         # Door sensors: a door reopening is a trigger to retry a room we skipped.
         watched += [ent for ent in self._door_sensors() if ent]
@@ -1195,7 +1199,7 @@ class SchedulerEngine:
         if EDGE_CLEAN_DISABLED:
             _LOGGER.info("edge clean is disabled (kill switch)")
             return False
-        if self.tracker.active_run is not None or self.tracker.edge_run is not None:
+        if self.tracker.active_run is not None or self.tracker.edge_run is not None or self.tracker.state.get("native_task"):
             return False
         from .dreame_mapdata import read_geometry, edge_strips_for_segments
         width = self._opt_int(OPT_EDGE_STRIP_MM, DEFAULT_EDGE_STRIP_MM)
@@ -2340,8 +2344,15 @@ class SchedulerEngine:
         vacuum = self.hass.states.get(self._vacuum_entity)
         if not history or not vacuum or self.tracker.active_map != "default":
             return
-        records = list(external_history.completed_passes(
-            history.attributes, self.tracker.state["external_since"], now.timestamp()))
+        state = self.tracker.state
+        attempts = state.get("native_dispatches", [])
+        external_since = state.get("external_since") if self._opt(OPT_EXTERNAL_CREDITS, False) else None
+        cutoffs = [a["start"] - 2 for a in attempts]
+        if external_since is not None:
+            cutoffs.append(external_since)
+        if not cutoffs:
+            return
+        records = list(external_history.completed_passes(history.attributes, min(cutoffs), now.timestamp()))
         if not records:
             return
         floors = vacuum.attributes.get("rooms") or {}
@@ -2378,7 +2389,15 @@ class SchedulerEngine:
             if any(external_history.owned_by_scheduler(p["start"], windows)
                    for p in passes):
                 continue
-            if external_history.apply_session(self.tracker.state, key, passes, names, now.tzinfo):
+            profile = weekday_plans.scheduled_profile(passes, attempts)
+            if not profile:
+                previous = next((row for row in state["history"] if row.get("source_id") == key), {})
+                profile = previous.get("profile")
+            if not profile:
+                passes = [p for p in passes if external_since is not None and p["start"] >= external_since]
+                if not passes:
+                    continue
+            if external_history.apply_session(state, key, passes, names, now.tzinfo, profile=profile):
                 self._external_save_pending = True
         if self._external_save_pending:
             await self.tracker.async_save()
@@ -2502,6 +2521,9 @@ class SchedulerEngine:
         except Exception as exc:  # noqa: BLE001
             _LOGGER.debug("room-area observe failed: %s", exc)
 
+        if await self._settle_native_task(dt_util.now()):
+            return
+
         if not self.tracker.enabled:
             self._set_status("disabled", "scheduler disabled")
             return
@@ -2572,7 +2594,7 @@ class SchedulerEngine:
             await self._check_edge_run(now, away_ok)
             return
 
-        if self._opt(OPT_EXTERNAL_CREDITS, False) and self._vacuum_state() == "docked":
+        if (self._opt(OPT_EXTERNAL_CREDITS, False) or self.tracker.state.get("native_dispatches")) and self._vacuum_state() == "docked":
             try:
                 await self._credit_external_history(now)
             except Exception:  # one unavailable history source must not stall dispatch
@@ -2605,6 +2627,11 @@ class SchedulerEngine:
         #     when nothing is pending, so there's no half-done/suspended run to strand.
         if self._holiday_hold(now):
             self._set_status("idle", "holiday — house already clean, cleaning paused")
+            return
+
+        profile = self._weekday_profile(weekday)
+        if weekday_plans.whole_home(profile):
+            await self._start_native_profile(profile, now)
             return
 
         # 3b) An interrupted run waiting for the house to empty again?
@@ -2789,7 +2816,154 @@ class SchedulerEngine:
             await self._resolve_offline_hold(
                 now, "running" if self._offline_hold["day"] == today_iso else "missed")
 
-    def _start_gates_ok(self, now_min: int) -> tuple[bool, str]:
+    def _weekday_profile(self, weekday):
+        return self._opt(OPT_WEEKDAY_PROFILES, {}).get(str(weekday))
+
+    def _native_entity(self, key):
+        domain, suffix = key.split(".")
+        return entity_of(domain, self._prefix, suffix)
+
+    def _native_start_blocker(self, now, manual=False):
+        departure = self._opt(weekday_plans.DEPARTURE, False)
+        now_min = now.hour * 60 + now.minute
+        if not manual:
+            if departure:
+                people = [self.hass.states.get(e) for e in self._presence_entities()]
+                if not people or any(s is None or str(s.state).lower() in
+                                     (*_UNAVAILABLE, "home", "on") for s in people):
+                    return "waiting for everyone to leave"
+                last_left = max(s.last_changed for s in people)
+                if (last_left.astimezone(now.tzinfo).date() != now.date() or
+                    (now - last_left).total_seconds() < 60 * self._opt_int(OPT_AWAY_GRACE_MIN, DEFAULT_AWAY_GRACE_MIN)):
+                    return "waiting for today's departure and away grace period"
+            else:
+                if now_min < (clean_window.to_minutes(self._opt(OPT_DAILY_TIME, DEFAULT_DAILY_TIME)) or 0):
+                    return "waiting for the daily time"
+                if self._opt(OPT_REQUIRE_AWAY, DEFAULT_REQUIRE_AWAY) and self._presence_entities() and (
+                    self._presence_home() is not False or not self.tracker.away_since or
+                    (now - datetime.fromisoformat(self.tracker.away_since)).total_seconds() <
+                    60 * self._opt_int(OPT_AWAY_GRACE_MIN, DEFAULT_AWAY_GRACE_MIN)
+                ):
+                    return "waiting for the house to be empty"
+        guards = self._opt(weekday_plans.GUARDS, {})
+        if not weekday_plans.required_states_valid(guards):
+            return "invalid required entity states"
+        for entity_id, expected in guards.items():
+            if self._sval(entity_id) != expected:
+                return f"waiting for {entity_id} to be {expected}"
+        if self._vacuum_state() != "docked":
+            return "waiting for the robot to be docked"
+        ok, reason = self._start_gates_ok(now_min, skip_window=departure or manual)
+        return None if ok else reason
+
+    async def _native_setting(self, key, target, *, remember):
+        """Verify a dependent firmware control before proceeding to the next one."""
+        entity = self._native_entity(key)
+        domain = key.split(".")[0]
+        for _ in range(10):
+            st = self.hass.states.get(entity)
+            if st and self._sval(entity) is not None and (
+                domain == "switch" or target in (st.attributes.get("options") or [])
+            ):
+                break
+            await asyncio.sleep(0.5)
+        else:
+            raise ValueError(f"{entity} does not offer {target}")
+        if st.state == target:
+            return
+        if remember:
+            self.tracker.state["native_task"]["restore"].append([key, st.state])
+            await self.tracker.async_save()
+        data = {"entity_id": entity}
+        if domain == "select":
+            data["option"] = target
+            service = "select_option"
+        else:
+            service = "turn_" + target
+        await self.hass.services.async_call(domain, service, data, blocking=True)
+        for _ in range(12):
+            if self._sval(entity) == target:
+                return
+            await asyncio.sleep(0.5)
+        raise ValueError(f"{entity} did not confirm {target}")
+
+    async def _settle_native_task(self, now):
+        """Retain the settings journal across reloads, partial preparation and retries."""
+        state = self.tracker.state
+        task = state.get("native_task")
+        if not task:
+            return False
+        started = task.get("sent")
+        if (self._vacuum_state() != "docked" or self._robot_busy()
+                or (started and self._charging_mid_task())):
+            if task.pop("parked_since", None) is not None:
+                await self.tracker.async_save()
+            self._set_status("running", weekday_plans.LABELS[task["profile"]])
+            return True
+        if started:
+            # A sequential job may briefly dock to wash or pick up its mop.
+            if not task.get("parked_since"):
+                task["parked_since"] = now.timestamp()
+                await self.tracker.async_save()
+            if now.timestamp() - task["parked_since"] < 900:
+                self._set_status("waiting", "waiting for the whole-home task to settle")
+                return True
+        try:
+            while task["restore"]:
+                key, previous = task["restore"][-1]
+                await self._native_setting(key, previous, remember=False)
+                task["restore"].pop()
+                await self.tracker.async_save()
+        except Exception as exc:
+            self._set_status("waiting", f"restoring whole-home settings: {exc}")
+            return True
+        state.pop("native_task")
+        await self.tracker.async_save()
+        return False
+
+    async def _start_native_profile(self, profile, now, *, manual=False):
+        state = self.tracker.state
+        if state.get("native_task") or self.tracker.active_run or self.tracker.edge_run or self.tracker.edge_restore:
+            self._set_status("waiting", "another task is in progress")
+            return
+        day = now.date().isoformat()
+        attempts = state.get("native_dispatches", [])
+        if attempts and attempts[-1]["day"] == day:
+            self._set_status("idle", "whole-home start already issued today")
+            return
+        reason = self._native_start_blocker(now, manual)
+        if reason:
+            self._set_status("waiting", reason)
+            return
+        if self._native_retry_after and now < self._native_retry_after:
+            self._set_status("waiting", self._native_retry_reason)
+            return
+        task = {"profile": profile, "restore": []}
+        state["native_task"] = task
+        await self.tracker.async_save()
+        try:
+            for key, target in weekday_plans.settings(profile, lambda k: self.hass.states.get(self._native_entity(k)) is not None):
+                await self._native_setting(key, target, remember=True)
+            current = dt_util.now()
+            reason = self._native_start_blocker(current, manual)
+            if current.date() != now.date() or reason:
+                raise ValueError(reason or "the scheduled day ended")
+            # Persist BEFORE the call. A dropped reply or a restart must not send a second start.
+            task["sent"] = current.timestamp()
+            state["native_dispatches"] = (attempts + [
+                {"start": task["sent"], "day": day, "profile": profile}
+            ])[-32:]
+            await self.tracker.async_save()
+            await self.hass.services.async_call("vacuum", "start", {"entity_id": self._vacuum_entity}, blocking=True)
+        except Exception as exc:
+            self._native_retry_reason = f"whole-home start: {exc}"
+            self._native_retry_after = now + timedelta(minutes=5)
+            self._set_status("waiting", self._native_retry_reason)
+            _LOGGER.warning("%s", self._native_retry_reason)
+            return
+        self._set_status("running", weekday_plans.LABELS[profile])
+
+    def _start_gates_ok(self, now_min: int, *, skip_window=False) -> tuple[bool, str]:
         """Window + battery + station preconditions for STARTING a clean.
         Presence and door reachability are handled by the caller."""
         # Robot unreachable (internet / Dreame cloud down, or entities still
@@ -2806,7 +2980,7 @@ class SchedulerEngine:
             overrun=bool(self._opt(OPT_WINDOW_OVERRUN, DEFAULT_WINDOW_OVERRUN)),
             already_cleaning=False,
         )
-        if not win["allow_start"]:
+        if not skip_window and not win["allow_start"]:
             return False, "outside the allowed cleaning window"
         if self._robot_busy():
             return False, "robot is busy with another task"
@@ -3985,6 +4159,10 @@ class SchedulerEngine:
         self._sync_active_map()
         async with self._eval_lock:
             now = dt_util.now()
+            profile = self._weekday_profile(now.weekday())
+            if weekday_plans.whole_home(profile) and not quiet:
+                await self._start_native_profile(profile, now, manual=True)
+                return
             due = [s for s in rooms_due_today(self._rooms(), now.weekday())
                    if s not in self.tracker.cleaned]
             await self._manual_dispatch(due, "manual", now, quiet)
@@ -4020,7 +4198,7 @@ class SchedulerEngine:
             await self._manual_dispatch(segs, "manual", now, quiet)
 
     async def _manual_dispatch(self, segments, kind, now, quiet: bool = False) -> None:
-        if self.tracker.active_run is not None:
+        if self.tracker.active_run is not None or self.tracker.state.get("native_task"):
             self._set_status("running", "a clean is already running")
             return
         if not segments:
@@ -4120,6 +4298,13 @@ class SchedulerEngine:
             wd = day.weekday()
             cutoff = now_min if offset == 0 else None   # today: only future times
             candidates: list[int] = []
+            if weekday_plans.whole_home(self._weekday_profile(wd)):
+                # Departure has no predictable wall-clock time.
+                if self._opt(weekday_plans.DEPARTURE, False):
+                    continue
+                if cutoff is None or daily_min > cutoff:
+                    return day.replace(hour=hh, minute=mm, second=0, microsecond=0)
+                continue
             # Global daily fire — only if some enabled room WITHOUT its own times
             # is scheduled that weekday (slotted rooms run on their slots instead).
             has_daily = any(
@@ -4195,6 +4380,8 @@ class SchedulerEngine:
 
         return {
             **self._status,
+            "weekday_profiles": self._opt(OPT_WEEKDAY_PROFILES, {}),
+            "whole_home_on_departure": self._opt(weekday_plans.DEPARTURE, False),
             "enabled": self.tracker.enabled,
             "week_start": self.tracker.week_start,
             "rooms_total": len(all_segs),

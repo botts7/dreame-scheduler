@@ -171,8 +171,9 @@ function renderWeekdaySelects() {
     label.textContent = day + " ";
     const select = document.createElement("select");
     const profiles = opt("weekday_profiles") || {};
-    fillSelect(select, [{value: "", label: "Scheduler default"}, {value: "rooms", label: "Room settings"},
-                        {value: "deep", label: "Vacuum before mop"}], profiles[index] || "");
+    const labels = CFG.weekday_profile_labels || {rooms: "Room settings", deep: "Vacuum before mop"};
+    const choices = Object.entries(labels).map(([value, label]) => ({value, label}));
+    fillSelect(select, [{value: "", label: "Scheduler default"}, ...choices], profiles[index] || "");
     select.onchange = () => {
       const next = {...(opt("weekday_profiles") || {})};
       if (select.value) next[index] = select.value;
