@@ -164,6 +164,24 @@ function fillSelect(sel, items, selected, { blank = false } = {}) {
 }
 
 function renderWeekdaySelects() {
+  const host = $("#weekday-profiles");
+  host.replaceChildren();
+  WEEK.forEach((day, index) => {
+    const label = document.createElement("label");
+    label.textContent = day + " ";
+    const select = document.createElement("select");
+    const profiles = opt("weekday_profiles") || {};
+    fillSelect(select, [{value: "", label: "Scheduler default"}, {value: "rooms", label: "Room settings"},
+                        {value: "deep", label: "Vacuum before mop"}], profiles[index] || "");
+    select.onchange = () => {
+      const next = {...(opt("weekday_profiles") || {})};
+      if (select.value) next[index] = select.value;
+      else delete next[index];
+      OPTS.weekday_profiles = next;
+    };
+    label.append(select);
+    host.append(label);
+  });
   $$("select[data-weekdays]").forEach(sel => {
     const key = sel.dataset.opt;
     fillSelect(sel, WEEK.map((d, i) => ({ value: i, label: d })), opt(key));

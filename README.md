@@ -46,6 +46,8 @@ _Report — per-room status this week, why rooms were missed, and the robot's ow
   entities, with a grace delay so it doesn't launch the moment you leave.
 - **Per-room schedule** — assign each room to specific weekdays, with its own
   cleaning mode / suction / mop wetness (discovered live from your vacuum).
+- **Weekday cleaning profiles** — under *Configure → Weekday cleaning & external credits*, choose room settings during the week and **Vacuum before mopping** on Saturday. Select all desired Saturday rooms under *Rooms*. Daily and catch-up runs use the profile, and an interrupted run keeps it when resumed. A deep profile uses the robot's global sequential mode. Native room protection, a target with a mop cadence other than every clean, or an unsupported sequential mode falls back to room settings.
+- **Credit completed external cleans** — optionally count jobs started outside the scheduler from the time the option is enabled. On a single default floor, completed Dreame history updates weekly credit and overdue tracking. Related sweep and mop passes share a session. Room cleans need matching historical map evidence, and spot or zone jobs earn no whole-room credit. A disconnected robot can catch up from its retained history when docked.
 - **More than once a day, per room** — give a room its own list of extra clean
   times, each a full clean or a **vacuum-only** pass (e.g. a quick midday sweep
   of the kitchen). Every extra pass is presence- and window-gated like any run.

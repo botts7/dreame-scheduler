@@ -74,6 +74,10 @@ from .const import (
     OPT_EDGE_NO_MOP,
     OPT_DAILY_TIME,
     OPT_DEFAULT_MODE,
+    DEFAULT_HONOR_NATIVE,
+    OPT_HONOR_NATIVE,
+    OPT_WEEKDAY_PROFILES,
+    OPT_EXTERNAL_CREDITS,
     OPT_DEFAULT_SUCTION,
     OPT_GUARD_DUSTBIN,
     OPT_GUARD_WATER,
@@ -226,8 +230,27 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
     async def async_step_init(self, user_input=None):
         return self.async_show_menu(
             step_id="init",
-            menu_options=["general", "presence", "rooms"],
+            menu_options=["general", "weekly", "presence", "rooms"],
         )
+
+    async def async_step_weekly(self, user_input=None):
+        if user_input is not None:
+            profiles = {str(i): user_input[day] for i, day in enumerate(WEEKDAYS)
+                        if user_input[day] != "inherit"}
+            return self._save({OPT_WEEKDAY_PROFILES: profiles,
+                               OPT_HONOR_NATIVE: user_input[OPT_HONOR_NATIVE],
+                               OPT_EXTERNAL_CREDITS: user_input[OPT_EXTERNAL_CREDITS]})
+        profiles = self._opt(OPT_WEEKDAY_PROFILES, {})
+        choices = selector.SelectSelector(selector.SelectSelectorConfig(options=[
+            selector.SelectOptionDict(value="inherit", label="Use scheduler default"),
+            selector.SelectOptionDict(value="rooms", label="Use per-room settings"),
+            selector.SelectOptionDict(value="deep", label="Vacuum before mopping"),
+        ]))
+        fields = {vol.Required(day, default=profiles.get(str(i), "inherit")): choices
+                  for i, day in enumerate(WEEKDAYS)}
+        fields[vol.Required(OPT_HONOR_NATIVE, default=self._opt(OPT_HONOR_NATIVE, DEFAULT_HONOR_NATIVE))] = selector.BooleanSelector()
+        fields[vol.Required(OPT_EXTERNAL_CREDITS, default=self._opt(OPT_EXTERNAL_CREDITS, False))] = selector.BooleanSelector()
+        return self.async_show_form(step_id="weekly", data_schema=vol.Schema(fields))
 
     # -------- general --------
     async def async_step_general(self, user_input=None):

@@ -238,6 +238,16 @@ def all_enabled_segments(rooms: dict) -> list[str]:
 SWEEP_ONLY_MODE = "sweeping"
 
 
+def weekday_deep_clean(profile, default, *, protected, quiet, sweep_only,
+                       sequential_available, room_cadences):
+    """An explicit deep profile can use global mode only on compatible targets."""
+    if protected or quiet or sweep_only or profile == "rooms":
+        return False
+    if profile == "deep":
+        return sequential_available and all(str(n) == "1" for n in room_cadences)
+    return default
+
+
 def is_mopping_mode(mode) -> bool:
     """True if a cleaning-mode option involves mopping (mopping / sweeping and
     mopping / mopping after sweeping / ...). Sweep-only modes return False."""

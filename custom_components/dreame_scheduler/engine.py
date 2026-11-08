@@ -94,6 +94,8 @@ from .const import (
     OPT_HOLIDAY_AFTER_DAYS,
     OPT_DAILY_TIME,
     OPT_DEFAULT_MODE,
+    OPT_WEEKDAY_PROFILES,
+    OPT_EXTERNAL_CREDITS,
     OPT_DEFAULT_SUCTION,
     OPT_GUARD_DUSTBIN,
     OPT_GUARD_WATER,
@@ -193,6 +195,7 @@ from .scheduler import (
     holiday_hold,
     tracker_stale,
     SWEEP_ONLY_MODE,
+    weekday_deep_clean,
 )
 from .week_tracker import WeekTracker
 
@@ -499,16 +502,26 @@ class SchedulerEngine:
         # room's real cleaned area can be folded into the learned estimate. In-memory
         # only (a partial observation on restart just isn't learned — no harm).
         self._area_obs: dict | None = None
+        self._external_save_pending = False
 
     # ------------------------------------------------------------------ setup
     async def async_start(self) -> None:
         await self.tracker.async_load()
+        state = self.tracker.state
+        enabled = self._opt(OPT_EXTERNAL_CREDITS, False)
+        if enabled and not state.get("external_since"):
+            state["external_since"] = dt_util.now().timestamp()
+            await self.tracker.async_save()
+        elif not enabled and state.pop("external_since", None) is not None:
+            await self.tracker.async_save()
         self._unsub.append(
             async_track_time_interval(
                 self.hass, self._handle_tick, timedelta(seconds=TICK_SECONDS)
             )
         )
         watched = [self._vacuum_entity, entity_of("sensor", self._prefix, SUF_ERROR)]
+        if enabled:
+            watched.append(entity_of("sensor", self._prefix, "cleaning_history"))
         watched += [ent for ent in self._presence_entities() if ent]
         # Door sensors: a door reopening is a trigger to retry a room we skipped.
         watched += [ent for ent in self._door_sensors() if ent]
@@ -2318,6 +2331,60 @@ class SchedulerEngine:
         except (TypeError, ValueError):
             return None
 
+    async def _credit_external_history(self, now):
+        """Reconcile completed passes under the same lock used for dispatch."""
+        from . import external_history
+        from .dreame_mapdata import resolve_coordinator
+
+        history = self.hass.states.get(entity_of("sensor", self._prefix, "cleaning_history"))
+        vacuum = self.hass.states.get(self._vacuum_entity)
+        if not history or not vacuum or self.tracker.active_map != "default":
+            return
+        records = list(external_history.completed_passes(
+            history.attributes, self.tracker.state["external_since"], now.timestamp()))
+        if not records:
+            return
+        floors = vacuum.attributes.get("rooms") or {}
+        coordinator = resolve_coordinator(self.hass, self._vacuum_entity)
+        status = getattr(getattr(coordinator, "device", None), "status", None)
+        maps = getattr(status, "map_list", None) or []
+        if len(maps) != 1 or len(floors) != 1 or getattr(status, "multi_map", True):
+            return  # segment IDs are reused between floors
+        floor, rooms = next(iter(floors.items()))
+        names = {str(room["id"]): room.get("name") or str(room["id"]) for room in rooms}
+        configured = set(all_enabled_segments(self._rooms()))
+        cached = getattr(status, "_history_map_data", None) or {}
+        by_start = {int(r.date.timestamp()): cached.get(r.object_name)
+                    for r in getattr(status, "_cleaning_history", None) or [] if r.date}
+        groups = {}
+        for key, start, end, raw in records:
+            m = by_start.get(start)
+            if raw.get("map_name") and raw["map_name"].strip() != floor.strip():
+                continue
+            evidence = None
+            if m is not None and int(m.last_updated or 0) == start:
+                if m.saved_map_id is not None and str(m.saved_map_id) != str(maps[0]):
+                    continue
+                evidence = {"targeted": m.active_segments, "cleaned": m.cleaned_segments}
+            ids = external_history.credit(raw, configured, set(names), evidence, MIN_AREA_PER_ROOM_M2)
+            groups.setdefault(key, []).append({
+                "start": start, "end": end, "scope": raw["status"], "area": raw["cleaned_area"],
+                "pad": raw.get("mop_pad"), "rooms": ids, "map_verified": bool(evidence),
+                "blocked": list(raw.get("blocked_rooms") or []),
+            })
+        windows = [(external_history.epoch(a), external_history.epoch(b))
+                   for a, b in self.tracker.state.get("dispatch_windows", [])]
+        for key, passes in groups.items():
+            if any(external_history.owned_by_scheduler(p["start"], windows)
+                   for p in passes):
+                continue
+            if external_history.apply_session(self.tracker.state, key, passes, names, now.tzinfo):
+                self._external_save_pending = True
+        if self._external_save_pending:
+            await self.tracker.async_save()
+            self._external_save_pending = False
+            self._push()
+
     def _latest_history_record(self, min_ts: float | None = None) -> dict | None:
         """The most recent cleaning-history record. Each record carries
         ``blocked_rooms`` ({segment_id: reason}) and ``cleaned_area`` — the map-
@@ -2504,6 +2571,12 @@ class SchedulerEngine:
         if self.tracker.edge_run is not None:
             await self._check_edge_run(now, away_ok)
             return
+
+        if self._opt(OPT_EXTERNAL_CREDITS, False) and self._vacuum_state() == "docked":
+            try:
+                await self._credit_external_history(now)
+            except Exception:  # one unavailable history source must not stall dispatch
+                _LOGGER.exception("Unable to reconcile Dreame cleaning history")
 
         # No run in flight — but the robot may still be stranded out there from a
         # finished/interrupted one (or have dropped a mop pad on its way home, or
@@ -2707,6 +2780,8 @@ class SchedulerEngine:
         #    on the slots the user tagged "vacuum only".
         await self._dispatch_clean(
             reachable, decision.kind, now,
+            profile=self._opt(OPT_WEEKDAY_PROFILES, {}).get(str(now.weekday()))
+            if decision.kind in ("daily", "catchup") else None,
             sweep_only=set(decision.sweep_only) & set(reachable),
         )
         await self._mark_dispatched(decision, today_iso)
@@ -2887,7 +2962,7 @@ class SchedulerEngine:
             waited += WAKE_POLL_SECONDS
 
     async def _dispatch_clean(self, segments: list[str], kind: str, now: datetime,
-                              quiet: bool = False, sweep_only=None) -> None:
+                              quiet: bool = False, sweep_only=None, profile=None) -> None:
         """Apply per-room settings (via customized cleaning) then start the
         segment clean. Every service call is best-effort so a model missing one
         of the optional per-room entities still cleans. ``quiet`` forces the
@@ -2907,6 +2982,7 @@ class SchedulerEngine:
             "segments": [str(s) for s in segments],
             "seg_names": seg_names,
             "started": now.isoformat(),
+            "profile": profile,
             "count_at_start": self._cleaning_count(),
             "record_ts_at_start": self._newest_record_ts(),
             "visited": [],
@@ -2922,8 +2998,13 @@ class SchedulerEngine:
         # onto the Main Room carpet and stalled the right wheel, because this
         # override mopped a room natively set to sweep.
         honor_native = bool(self._opt(OPT_HONOR_NATIVE, DEFAULT_HONOR_NATIVE))
-        deep = (bool(self._opt(OPT_VACUUM_BEFORE_MOP, DEFAULT_VACUUM_BEFORE_MOP))
-                and not quiet and not honor_native)
+        rooms = self._rooms()
+        deep = weekday_deep_clean(
+            profile, bool(self._opt(OPT_VACUUM_BEFORE_MOP, DEFAULT_VACUUM_BEFORE_MOP)),
+            protected=honor_native, quiet=quiet, sweep_only=sweep_only,
+            sequential_available=profile != "deep" or self._pick_seq_mode() is not None,
+            room_cadences=(rooms.get(s, {}).get(ROOM_MOP_EVERY, DEFAULT_ROOM_MOP_EVERY) for s in segments),
+        )
 
         if deep:
             # Vacuum-before-mop: sweep the whole area, THEN mop it (no smearing).
@@ -2940,7 +3021,6 @@ class SchedulerEngine:
         else:
             await self._svc("switch", "turn_on",
                             {"entity_id": entity_of("switch", self._prefix, SUF_CUSTOMIZED)})
-            rooms = self._rooms()
             default_mode = self._opt(OPT_DEFAULT_MODE, "")
             today_iso = now.date().isoformat()
             applied: dict = {}   # seg -> resolved {mode, will_mop} for the run history
@@ -3409,7 +3489,7 @@ class SchedulerEngine:
         if interrupted:
             if skipped and bool(self._opt(OPT_RESUME_WHEN_AWAY, DEFAULT_RESUME_WHEN_AWAY)):
                 await self.tracker.async_set_resume(
-                    {"segments": skipped, "kind": run.get("kind", "daily")}
+                    {"segments": skipped, "kind": run.get("kind", "daily"), "profile": run.get("profile")}
                 )
             await self.tracker.async_set_last_run({
                 "kind": run.get("kind"), "finished": ts, "interrupted": True,
@@ -3583,7 +3663,7 @@ class SchedulerEngine:
         reachable = [s for s in segs if clean_guards.room_reachable(self._door_state(s))]
         gates_ok, reason = self._start_gates_ok(now_min)
         if reachable and gates_ok:
-            await self._dispatch_clean(reachable, resume.get("kind", "daily"), now)
+            await self._dispatch_clean(reachable, resume.get("kind", "daily"), now, profile=resume.get("profile"))
             await self.tracker.async_set_resume(None)
             return True
         # Not dispatchable right now (doors closed / a gate failing). Keep the
