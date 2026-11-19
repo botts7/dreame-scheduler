@@ -92,3 +92,25 @@ def room_reachable(door_state: str | None, *, open_states: tuple[str, ...] = ("o
     if s in ("unknown", "unavailable", ""):
         return True
     return s in open_states
+
+
+# A catch-up that chains straight after another run starts on whatever the
+# previous clean left in the battery. Live 2026-11-16: it went out 1 min after a
+# 67-min daily, hit battery_low twice and sat ~2 h charging each time, turning a
+# 1 h job into 7 h that ran into the evening. Hold it until the battery is back.
+CHAIN_RECENT_SECONDS = 3600
+CHAIN_MIN_BATTERY = 80
+
+
+def chained_battery_ok(level: float | int | str | None,
+                       seconds_since_last_run: float | None,
+                       *, recent: float = CHAIN_RECENT_SECONDS,
+                       minimum: int = CHAIN_MIN_BATTERY) -> bool:
+    """False while a run finished within ``recent`` seconds and the battery is
+    still under ``minimum``. Fail-open on unknown battery or no prior run."""
+    if seconds_since_last_run is None or seconds_since_last_run >= recent:
+        return True
+    try:
+        return float(level) >= float(minimum)
+    except (TypeError, ValueError):
+        return True

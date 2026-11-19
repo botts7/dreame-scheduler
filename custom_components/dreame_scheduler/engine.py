@@ -172,6 +172,8 @@ from .const import (
 from .consumables import CONSUMABLE_BY_KEY, CONSUMABLES, evaluate_consumables
 from .mop_lost import is_mop_lost, plan_send as mop_lost_plan_send
 from .offline_hold import OFFLINE_REASON, hold_notice, robot_online
+from .run_resume import resume_with_start, stuck_flag_on_pause_change, task_words_stale
+from .parked_fault import fault_fix, parked_fault, plan as parked_fault_plan
 from .scheduler import (
     advance_mop_cadence,
     active_map_key,
@@ -191,6 +193,7 @@ from .scheduler import (
     has_explicit_times,
     next_slot_minute,
     holiday_hold,
+    presence_hold_text,
     tracker_stale,
     SWEEP_ONLY_MODE,
 )
@@ -1028,6 +1031,49 @@ class SchedulerEngine:
                 high_priority=True,
             )
         self._set_status("error", f"can't set up at the dock — {raw}")
+        return True
+
+    async def _watch_parked_fault(self, run: dict, now: datetime) -> bool:
+        """A fault that halted the task with the vacuum reading `paused`, not
+        `error` (e.g. water_tank_dry at the dock). Alert once, and close the run
+        if it stays halted, so the next clean isn't blocked. True = handled."""
+        raw = self._error_text()
+        if not parked_fault(self._vacuum_state(), raw):
+            if run.get("fault_since"):
+                run["fault_since"] = None
+                run["notified_fault"] = False
+                await self.tracker.async_set_active_run(run)
+            return False
+        if not run.get("fault_since"):
+            run["fault_since"] = now.isoformat()
+            await self.tracker.async_set_active_run(run)
+        since = _parse_iso(run.get("fault_since"))
+        held = (now - since).total_seconds() if since else 0
+        va = self.hass.states.get(self._vacuum_entity)
+        label = str((va.attributes.get("error") if va else None) or raw)
+        rooms = ", ".join(self._room_name(str(s)) for s in run.get("segments", [])) or "the run"
+        action = parked_fault_plan(held, bool(run.get("notified_fault")))
+        if action == "close":
+            _LOGGER.warning("closing run halted by %s for %.0f s", raw, held)
+            await self._finalize_run(run, now, interrupted=True)
+            await self._notify(
+                "Scheduled clean stopped",
+                f"The vacuum was still halted ({label}), so this clean was closed. "
+                f"{rooms} stay pending for the next run.",
+            )
+            return True
+        if action == "alert":
+            run["notified_fault"] = True
+            await self.tracker.async_set_active_run(run)
+            if bool(self._opt(OPT_NOTIFY_STUCK, DEFAULT_NOTIFY_STUCK)):
+                await self._notify(
+                    f"Vacuum paused: {label}",
+                    f"{fault_fix(raw)} It's paused "
+                    + ("at the dock" if self._at_dock() else f"near {self._sval(entity_of('sensor', self._prefix, 'current_room')) or 'the last room'}")
+                    + f" with {rooms} to finish. Once that's sorted it should carry on by itself.",
+                    high_priority=True,
+                )
+        self._set_status("waiting", f"halted: {label}")
         return True
 
     async def _watch_mop_lost(self, now: datetime, run: dict | None = None) -> bool:
@@ -2214,21 +2260,18 @@ class SchedulerEngine:
                 out[c["key"]] = None
         return out
 
-    def _presence_home(self) -> bool | None:
-        """True if anyone home, False if all away, None if undeterminable.
+    def _presence_readings(self) -> list[tuple[str, str, bool]]:
+        """(entity_id, friendly name, is_home_or_on) for each presence entity that
+        has a usable, non-stale reading.
 
         A presence entity that hasn't reported for longer than
         ``presence_stale_min`` (opt-in, 0 = off) is treated as STALE and ignored —
         a wedged phone tracker stuck at 'home' would otherwise silently block
-        cleaning forever. If every entity is unavailable or stale, presence stays
-        None (undeterminable), which the away-gate treats as 'not away' (fail-safe)."""
-        ents = self._presence_entities()
-        if not ents:
-            return None
+        cleaning forever."""
         stale_min = self._opt_int(OPT_PRESENCE_STALE_MIN, DEFAULT_PRESENCE_STALE_MIN)
         now = dt_util.now()
-        seen = []
-        for ent in ents:
+        out = []
+        for ent in self._presence_entities():
             st = self.hass.states.get(ent)
             if st is None or str(st.state).lower() in _UNAVAILABLE:
                 continue
@@ -2239,10 +2282,27 @@ class SchedulerEngine:
                     _LOGGER.debug("presence: ignoring stale %s (no report for %.0f min)",
                                   ent, (age or 0) / 60)
                     continue
-            seen.append(str(st.state).lower() in ("home", "on"))
+            name = st.attributes.get("friendly_name") or ent
+            out.append((ent, str(name), str(st.state).lower() in ("home", "on")))
+        return out
+
+    def _presence_home(self) -> bool | None:
+        """True if anyone home, False if all away, None if undeterminable.
+
+        If every entity is unavailable or stale, presence stays None
+        (undeterminable), which the away-gate treats as 'not away' (fail-safe)."""
+        if not self._presence_entities():
+            return None
+        seen = [home for _, _, home in self._presence_readings()]
         if not seen:
             return None
         return any(seen)
+
+    def _hold_text(self) -> str | None:
+        """'X is on' when a sensor/toggle (not a person or tracker) is what's
+        holding cleaning off, so the status doesn't claim someone is home."""
+        return presence_hold_text([(e.split(".", 1)[0], n)
+                                   for e, n, home in self._presence_readings() if home])
 
     def _door_state(self, seg: str) -> str | None:
         cfg = self._rooms().get(seg, {})
@@ -2660,7 +2720,8 @@ class SchedulerEngine:
         #    used to run first, re-striking and re-notifying blocked rooms once
         #    per tick for as long as the run stayed gated here.
         if not away_ok:
-            self._set_status("waiting", "waiting for everyone to leave")
+            held = self._hold_text()
+            self._set_status("waiting", f"waiting: {held}" if held else "waiting for everyone to leave")
             return
 
         # b) Window + battery + station + robot-idle gates.
@@ -2672,6 +2733,15 @@ class SchedulerEngine:
                 _LOGGER.info("%s dispatch held: robot offline", decision.kind)
             self._set_status("waiting", reason)
             return
+
+        # b2) A catch-up right after another run waits for the battery to come
+        #     back, so it runs straight through instead of stopping to recharge.
+        if decision.kind == "catchup":
+            finished = _parse_iso((self.tracker.last_run or {}).get("finished"))
+            since = (now - finished).total_seconds() if finished else None
+            if not clean_guards.chained_battery_ok(self._battery(), since):
+                self._set_status("waiting", "catch-up waiting for the battery to recharge")
+                return
 
         # c) Door reachability — drop closed-door rooms. Side effects are safe
         #    now: we dispatch or consume the day immediately below, so this runs
@@ -3046,16 +3116,20 @@ class SchedulerEngine:
                 # (the un-cleaned area). Only a bare vacuum.start does that — but
                 # if the paused task is gone, vacuum.start whole-houses, so guard
                 # on the robot actually reporting a paused/segment task and
-                # otherwise re-dispatch just our segments.
+                # otherwise re-dispatch just our segments. An errored robot's
+                # paused task is no clean breakpoint either: live 2026-11-02 a
+                # bare start on a robot sat in 'blocked' cleaned 12 extra rooms.
                 va = self.hass.states.get(self._vacuum_entity)
                 paused_task = bool(va and (va.attributes.get("cleaning_paused")
                                            or va.attributes.get("paused")
                                            or va.attributes.get("segment_cleaning")))
-                if paused_task:
+                if resume_with_start(paused_task, self._error_active(), bool(run.get("errored"))):
                     await self._svc("vacuum", "start", {"entity_id": self._vacuum_entity})
                 else:
                     await self._resume_run(run)
                 run["suspended"] = False
+                run["notified_stuck"] = stuck_flag_on_pause_change(
+                    bool(run.get("notified_stuck")), self._error_active())
                 await self.tracker.async_set_active_run(run)
                 self._set_status("running", "resuming the un-cleaned area")
                 await self._notify(
@@ -3078,6 +3152,8 @@ class SchedulerEngine:
                 # Dropped a mop pad? Same handling as an active run (send home,
                 # say where the pad is, end the run) rather than the vague alert.
                 if await self._watch_mop_lost(now, run):
+                    return
+                if await self._watch_parked_fault(run, now):
                     return
                 # Stuck while suspended? The normal stuck-notify lives past this
                 # early return, so it never fires for a suspended run — alert here.
@@ -3168,16 +3244,23 @@ class SchedulerEngine:
                 and self._presence_home() is True):
             map_resume = bool(self._opt(OPT_MAP_RESUME, DEFAULT_MAP_RESUME))
             await self._svc("vacuum", "return_to_base", {"entity_id": self._vacuum_entity})
+            held = self._hold_text()
             await self._notify(
-                "Vacuum stepping aside — someone's home",
-                "Returning to the dock to stay out of your way. It'll "
+                f"Vacuum stepping aside: {held}" if held else "Vacuum stepping aside — someone's home",
+                ("Returning to the dock. It'll " if held
+                 else "Returning to the dock to stay out of your way. It'll ")
                 + ("continue the un-cleaned area" if map_resume else "finish the remaining rooms")
-                + " once everyone's out again.",
+                + (" once that's off and the house is clear." if held else " once everyone's out again."),
             )
             if map_resume:
                 # Suspend the breakpoint-resume task — don't finalise; resume the
                 # un-cleaned area later via vacuum.start.
                 run["suspended"] = True
+                # A fresh error while paused must alert even if one fired
+                # earlier in the run (live 2026-11-02: it sat blocked 1.5 h
+                # unannounced because the 10:20 alert had set the flag).
+                run["notified_stuck"] = stuck_flag_on_pause_change(
+                    bool(run.get("notified_stuck")), self._error_active())
                 await self.tracker.async_set_active_run(run)
                 self._set_status("waiting", "someone home — paused (will resume un-cleaned area)")
             else:
@@ -3188,6 +3271,11 @@ class SchedulerEngine:
                 run["interrupting"] = True
                 await self.tracker.async_set_active_run(run)
                 self._set_status("returning", "someone home — returning to dock")
+            return
+
+        # Halted by a fault that leaves the vacuum `paused` rather than in
+        # `error` (empty water tank at the dock): alert, then close if it stays.
+        if await self._watch_parked_fault(run, now):
             return
 
         # Stuck? Try to unstick it and carry on (wall off the spot) before we
@@ -3254,8 +3342,17 @@ class SchedulerEngine:
             # was finalised at 10:02 while the robot was starting its second
             # session, mis-marking the remaining rooms as skipped.)
             # (Interrupted runs that have physically docked skip this hold —
-            # lingering "paused" task words would otherwise keep them open.)
-            if cleaning_active and not (run.get("interrupting") and vstate in _PARKED_STATES):
+            # lingering "paused" task words would otherwise keep them open.
+            # So does a parked robot whose own record says this task completed:
+            # live 2026-11-02 task_status sat on room_cleaning for 6 h while it
+            # slept on the dock.)
+            record = self._run_record(run)
+            stale_task = task_words_stale(
+                vstate in _PARKED_STATES,
+                any(w in status for w in _CLEANING_ACTIVE_WORDS),
+                bool(record and record.get("completed") is True))
+            if (cleaning_active and not stale_task
+                    and not (run.get("interrupting") and vstate in _PARKED_STATES)):
                 if run.get("parked_since") or run.get("completed_at"):
                     run["parked_since"] = None
                     run["completed_at"] = None
@@ -3268,7 +3365,6 @@ class SchedulerEngine:
             # once this run's record is available; if it hasn't landed within
             # RECORD_SYNC_WAIT_SECONDS, give up and finalise with record=None
             # (best-effort: unseen rooms stay pending).
-            record = self._run_record(run)
             if record is None:
                 if not run.get("completed_at"):
                     run["completed_at"] = now.isoformat()
@@ -3616,13 +3712,17 @@ class SchedulerEngine:
                 continue                                   # only SCHEDULED rooms
             # Persistent-failure evidence: the worse of the cross-week history
             # streak and this week's skip strikes.
-            misses = max(hist_a.consecutive_fails(history, str(seg)),
+            # Only misses AFTER the latest confirmed clean count: a room ticked
+            # off by hand mustn't return on older misses (issue #3).
+            confirmed = self.tracker.confirmed.get(str(seg))
+            misses = max(hist_a.fails_since(history, str(seg), confirmed),
                          int(unreachable.get(str(seg), 0)))
             if misses < min_misses:
                 continue
             # How long since it was actually cleaned (history survives weekly
             # resets; fall back to this week's cleaned mark).
-            last = hist_a.last_cleaned_ts(history, str(seg)) or cleaned.get(str(seg))
+            last = hist_a.newest_ts(hist_a.last_cleaned_ts(history, str(seg)),
+                                    confirmed, cleaned.get(str(seg)))
             last_dt = _parse_iso(last)
             days = (now - last_dt).days if last_dt else None
             if days is not None and days < stale_days:

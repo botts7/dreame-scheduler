@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.3
+
+- **Presence picker lists binary sensors and toggle helpers** (integration #2,
+  add-on #2). Pick an input_boolean like "No Vacuum", or an "awake" sensor, and
+  cleaning waits while it's on. Pairs with integration 0.6.5.
+- Clearer error when the add-on has no Home Assistant token: it now says to set
+  `DS_HA_TOKEN` and `DS_HA_BASE_URL` when running standalone in Docker.
+
 ## 0.6.2
 
 - **Robot picker** for multi-vacuum homes (e.g. one robot per floor). When more

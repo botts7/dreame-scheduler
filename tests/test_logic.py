@@ -455,6 +455,72 @@ check("offline: minutes formatting", "45 min" in oh.hold_notice(45 * 60, "runnin
 check("offline: unknown outcome is silent", oh.hold_notice(9999, "other") is None)
 check("offline: notices avoid em-dashes", all("—" not in t for n in (_run, _miss) for t in n))
 
+# ---- run_resume ----
+rr = load("run_resume")
+check("resume: healthy paused task continues breakpoint", rr.resume_with_start(True, False, False) is True)
+check("resume: no paused task re-dispatches", rr.resume_with_start(False, False, False) is False)
+check("resume: live error re-dispatches (2026-11-02 whole-house)", rr.resume_with_start(True, True, False) is False)
+check("resume: errored earlier in run re-dispatches", rr.resume_with_start(True, False, True) is False)
+check("stuck flag: alerted error still live keeps flag", rr.stuck_flag_on_pause_change(True, True) is True)
+check("stuck flag: alerted error cleared resets flag", rr.stuck_flag_on_pause_change(True, False) is False)
+check("stuck flag: never alerted stays clear", rr.stuck_flag_on_pause_change(False, True) is False)
+check("stale task: parked, quiet status, completed record", rr.task_words_stale(True, False, True) is True)
+check("stale task: mid-task dock (completed False) still holds", rr.task_words_stale(True, False, False) is False)
+check("stale task: robot not parked still holds", rr.task_words_stale(False, False, True) is False)
+check("stale task: status still cleaning still holds", rr.task_words_stale(True, True, True) is False)
+
+# ---- parked_fault ----
+pf = load("parked_fault")
+check("parked fault: water_tank_dry while paused (2026-11-06)", pf.parked_fault("paused", "water_tank_dry") is True)
+check("parked fault: vacuum error state handled elsewhere", pf.parked_fault("error", "water_tank_dry") is False)
+check("parked fault: docked with no task ignored", pf.parked_fault("docked", "water_tank_dry") is False)
+check("parked fault: plain pause with no error ignored", pf.parked_fault("paused", "no_error") is False)
+check("parked fault: missing error text ignored", pf.parked_fault("paused", None) is False)
+check("parked fault: mop pad reminder ignored", pf.parked_fault("paused", "clean_mop_pad") is False)
+check("parked fault: case tolerant", pf.parked_fault("Paused", "Water_Tank_Dry") is True)
+check("parked fault: mid-clean recharge (battery_low) is not a fault", pf.parked_fault("paused", "battery_low") is False)
+check("parked fault: low_battery spelling too", pf.parked_fault("paused", "low_battery") is False)
+check("parked fault fix: refill for dry tank", "Refill the clean water tank" in pf.fault_fix("water_tank_dry"))
+check("parked fault fix: dirty tank", "dirty water" in pf.fault_fix("dirty_water_tank_full"))
+check("parked fault fix: unknown gets generic", "Dreame app" in pf.fault_fix("something_new"))
+check("parked fault plan: brief blip waits", pf.plan(30, False) == "wait")
+check("parked fault plan: alerts after grace", pf.plan(200, False) == "alert")
+check("parked fault plan: alerts once", pf.plan(200, True) == "wait")
+check("parked fault plan: closes after limit", pf.plan(3 * 3600, True) == "close")
+check("parked fault plan: closes even if never alerted", pf.plan(4 * 3600, False) == "close")
+check("parked fault: fixes avoid em-dashes", all("—" not in f for _, f in pf._FIXES))
+
+# ---- chained catch-up battery (2026-11-16) ----
+check("chain: catch-up 1 min after a run on 40% waits", cg.chained_battery_ok(40, 60) is False)
+check("chain: recharged to 80% goes", cg.chained_battery_ok(80, 60) is True)
+check("chain: over an hour since last run goes", cg.chained_battery_ok(40, 3600) is True)
+check("chain: no previous run goes", cg.chained_battery_ok(40, None) is True)
+check("chain: unknown battery fails open", cg.chained_battery_ok(None, 60) is True)
+check("chain: string battery parsed", cg.chained_battery_ok("85", 60) is True)
+
+# ---- issue #3: misses before a confirmed clean don't count ----
+def _h(ts, status):
+    return {"ts": ts, "weekday": 0, "kind": "daily", "per_room": {"5": {"status": status}}}
+_hist3 = [_h("2026-10-01T10:00:00+11:00", "cleaned")] + [
+    _h(f"2026-10-0{d}T10:00:00+11:00", "skipped") for d in (2, 3, 4, 5)]
+check("#3: old streak counted without a confirmation", ha.fails_since(_hist3, "5", None) == 4)
+check("#3: ticked by hand after the misses -> 0", ha.fails_since(_hist3, "5", "2026-11-08T12:00:00+11:00") == 0)
+_hist3b = _hist3 + [_h(f"2026-11-1{d}T10:00:00+11:00", "skipped") for d in (0, 1, 2)]
+check("#3: only misses after the credit count", ha.fails_since(_hist3b, "5", "2026-11-08T12:00:00+11:00") == 3)
+check("#3: other rooms unaffected", ha.fails_since(_hist3b, "9", "2026-11-08T12:00:00+11:00") == 0)
+check("#3: newest_ts picks the latest", ha.newest_ts("2026-10-01T10:00:00+11:00", "2026-11-08T12:00:00+11:00", None) == "2026-11-08T12:00:00+11:00")
+check("#3: newest_ts all empty", ha.newest_ts(None, "", "bad") is None)
+check("#3: confirmation predates misses -> they count",
+      ha.fails_since(_hist3, "5", "2026-09-30T10:00:00+11:00") == 4)
+check("#3: naive timestamp ignored, no crash", ha.fails_since(_hist3, "5", "2026-11-08T12:00:00") == 4)
+check("#3: newest_ts skips naive", ha.newest_ts("2026-11-09T12:00:00", "2026-11-08T12:00:00+11:00") == "2026-11-08T12:00:00+11:00")
+
+# ---- #2: hold wording names the toggle, not "someone's home" ----
+check("hold: toggle named", sc.presence_hold_text([("input_boolean", "No Vacuum")]) == "No Vacuum is on")
+check("hold: two switches", sc.presence_hold_text([("binary_sensor", "Awake"), ("input_boolean", "No Vacuum")]) == "Awake and No Vacuum are on")
+check("hold: a person home keeps the usual wording", sc.presence_hold_text([("person", "Sam"), ("input_boolean", "No Vacuum")]) is None)
+check("hold: nothing blocking", sc.presence_hold_text([]) is None)
+
 print()
 print("RESULT:", "ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}")
 sys.exit(1 if fails else 0)

@@ -639,3 +639,20 @@ def evaluate_progress(ref, now_iso, prog, area, dist, min_escape_mm):
         ref["anchor_dist"] = dist
         ref["notified"] = False
     return (ref, productive)
+
+
+# Domains that mean an actual person/device being home. Anything else in the
+# presence list (binary_sensor, input_boolean) is a "don't clean now" switch.
+_PEOPLE_DOMAINS = ("person", "device_tracker", "group")
+
+
+def presence_hold_text(blockers: list[tuple[str, str]]) -> str | None:
+    """Status wording when a sensor or toggle, not a person, is holding cleaning.
+
+    ``blockers`` is [(domain, friendly name)] for every presence entity that is
+    currently home/on. Returns e.g. "No Vacuum is on", or None when a person or
+    tracker is among them (the usual "someone's home" wording applies)."""
+    if not blockers or any(d in _PEOPLE_DOMAINS for d, _ in blockers):
+        return None
+    names = [n for _, n in blockers]
+    return (", ".join(names[:-1]) + " and " + names[-1] if len(names) > 1 else names[0])         + (" are on" if len(names) > 1 else " is on")

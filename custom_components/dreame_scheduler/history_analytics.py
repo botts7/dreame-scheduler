@@ -18,6 +18,8 @@ weekday rates ignore days the room wasn't scheduled.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 
 def _room(entry: dict, seg: str) -> dict | None:
     return (entry.get("per_room") or {}).get(str(seg))
@@ -101,3 +103,45 @@ def suggest_better_day(history: list, seg: str, current_days,
             if rate >= best_rate:
                 best, best_rate = d, rate
     return best
+
+
+def _ts(value) -> datetime | None:
+    """Parse an ISO timestamp; timezone-less values are dropped so a stray naive
+    timestamp can never raise when compared with the aware ones."""
+    try:
+        dt = datetime.fromisoformat(str(value)) if value else None
+    except (TypeError, ValueError):
+        return None
+    return dt if dt is not None and dt.tzinfo is not None else None
+
+
+def newest_ts(*values) -> str | None:
+    """The latest of several ISO timestamps (unparseable/None ignored)."""
+    best, best_dt = None, None
+    for v in values:
+        dt = _ts(v)
+        if dt is not None and (best_dt is None or dt > best_dt):
+            best, best_dt = v, dt
+    return best
+
+
+def fails_since(history: list, seg: str, since: str | None) -> int:
+    """consecutive_fails, but only counting runs strictly AFTER ``since`` (the
+    room's latest confirmed clean, robot or by hand). A room ticked off the
+    clean-by-hand list must not come straight back on misses from before that
+    credit (issue #3)."""
+    cutoff = _ts(since)
+    if cutoff is None:
+        return consecutive_fails(history, seg)
+    n = 0
+    for entry in reversed(history):
+        r = _room(entry, seg)
+        if r is None:
+            continue
+        when = _ts(entry.get("ts"))
+        if when is not None and when <= cutoff:
+            break
+        if r.get("status") == "cleaned":
+            break
+        n += 1
+    return n

@@ -3,6 +3,42 @@
 All notable changes to the Dreame Scheduler integration and its companion
 add-on are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.6.5] (2026-11-19)
+
+### Integration (`custom_components/dreame_scheduler`)
+- **Fix: resuming after a pause no longer cleans the whole house when the robot
+  had errored.** If the robot hit an error (like "blocked") during the run, the
+  resume now re-sends just that run's rooms instead of a plain start.
+- **Fix: an error while paused for someone being home now alerts you**, even if
+  an earlier error in the same run already did.
+- **Fix: a finished run no longer stays open for hours** when the robot's task
+  status gets stuck on "room cleaning" while it sleeps on the dock. If the robot
+  is parked and its own record says the clean completed, the run closes.
+- **New: an alert when a fault halts a clean at the dock.** Some faults, like an
+  empty clean water tank, pause the robot on the dock instead of showing an error,
+  so nothing used to alert you and the run stayed open, blocking the next day's
+  clean. Now you get one alert that names the fault and the fix (for example
+  "Refill the clean water tank"). If it's still halted after 3 hours, the run is
+  closed and its rooms stay pending. A mid-clean recharge (low battery) is not
+  treated as a fault.
+- **Catch-ups wait for the battery after another run.** A catch-up used to go
+  out the minute the previous clean docked, on whatever battery was left, then
+  stop twice to recharge and drag on into the evening. If a run finished in the
+  last hour, the catch-up now waits until the battery is back to 80%.
+- **Fix: rooms you tick off "Clean by hand" no longer come straight back** (#3).
+  The list counted misses from before the room was last cleaned, so a room you
+  had just done by hand reappeared on the next refresh. Each room now remembers
+  its latest confirmed clean (by the robot or by hand) across weeks, and only
+  misses after that count.
+- **Hold cleaning on any sensor or toggle, not just people** (#2). The presence
+  list now also takes toggle helpers (input_boolean), alongside people, trackers,
+  groups and binary sensors. Cleaning waits while any of them is home or on, so
+  you can, for example, only clean while an "asleep" flag says it's fine. When
+  one of those switches is what's holding cleaning, the status and the
+  step-aside alert name it ("waiting: No Vacuum is on") instead of saying
+  someone's home. Pairs with add-on 0.6.3, whose picker now lists binary
+  sensors and toggle helpers.
+
 ## [0.6.4] (2026-11-05)
 
 ### Integration (`custom_components/dreame_scheduler`)

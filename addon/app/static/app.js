@@ -182,7 +182,7 @@ function renderChoiceSelects() {
   });
 }
 
-const _GROUP_LABEL = { person: "People", device_tracker: "Device trackers", group: "Groups" };
+const _GROUP_LABEL = { person: "People", device_tracker: "Device trackers", group: "Groups", binary_sensor: "Binary sensors", input_boolean: "Toggle helpers" };
 const _openCombos = new Set();  // pos() fns of currently-open dropdowns
 
 function renderPickers() {
@@ -192,7 +192,7 @@ function renderPickers() {
     const items = ENTITIES.filter(e => domains.includes(e.domain))
       .map(e => ({ value: e.entity_id, label: e.name, sub: e.entity_id, domain: e.domain, group: _GROUP_LABEL[e.domain] || e.domain }))
       .sort((a, b) => (domains.indexOf(a.domain) - domains.indexOf(b.domain)) || String(a.label).localeCompare(String(b.label)));
-    buildCombo(host, items, opt(host.dataset.opt) || [], v => { OPTS[host.dataset.opt] = v; }, "Search people / trackers…");
+    buildCombo(host, items, opt(host.dataset.opt) || [], v => { OPTS[host.dataset.opt] = v; }, "Search people, trackers, sensors…");
   });
   // notify target pickers
   $$(".picker[data-notify]").forEach(host => {

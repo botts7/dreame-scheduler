@@ -303,7 +303,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             vol.Optional(OPT_REQUIRE_AWAY, default=self._opt(OPT_REQUIRE_AWAY, DEFAULT_REQUIRE_AWAY)): selector.BooleanSelector(),
             vol.Optional(OPT_PRESENCE_ENTITIES, default=self._opt(OPT_PRESENCE_ENTITIES, [])): selector.EntitySelector(
                 selector.EntitySelectorConfig(
-                    domain=["person", "device_tracker", "group", "binary_sensor"], multiple=True)),
+                    domain=["person", "device_tracker", "group", "binary_sensor", "input_boolean"], multiple=True)),
             vol.Optional(OPT_AWAY_GRACE_MIN, default=self._opt(OPT_AWAY_GRACE_MIN, DEFAULT_AWAY_GRACE_MIN)): selector.NumberSelector(
                 selector.NumberSelectorConfig(min=0, max=120, step=1, unit_of_measurement="min", mode=selector.NumberSelectorMode.BOX)),
             vol.Optional(OPT_PRESENCE_STALE_MIN, default=self._opt(OPT_PRESENCE_STALE_MIN, DEFAULT_PRESENCE_STALE_MIN)): selector.NumberSelector(

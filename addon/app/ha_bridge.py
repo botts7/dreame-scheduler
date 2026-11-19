@@ -49,7 +49,7 @@ def _safe_entity(entity_id: str) -> str:
 
 # Domains the pickers care about: presence (person/device_tracker/group) and
 # door contact sensors (binary_sensor). Keeps the /states payload small.
-_PICKER_DOMAINS = ("person", "device_tracker", "group", "binary_sensor")
+_PICKER_DOMAINS = ("person", "device_tracker", "group", "binary_sensor", "input_boolean")
 
 _ACTIONS = ("run_scheduled_now", "run_catchup_now", "reset_week",
             "apply_learned_nogo", "show_unreachable", "edge_clean")
@@ -87,7 +87,10 @@ def _headers(cfg: CoreConfig) -> dict[str, str]:
 
 def _ensure(cfg: CoreConfig) -> None:
     if not cfg.available:
-        raise CoreUnavailable("SUPERVISOR_TOKEN not set — is homeassistant_api granted?")
+        raise CoreUnavailable(
+            "no Home Assistant token: under the Supervisor check homeassistant_api is granted; "
+            "standalone (Docker), set DS_HA_TOKEN to a long-lived token and DS_HA_BASE_URL"
+        )
 
 
 def list_states(cfg: CoreConfig, timeout: float = 8.0) -> list[dict[str, Any]]:

@@ -125,7 +125,7 @@
         <div class="field"><label>Only clean when no one is home</label><span class="control" data-toggle="require_away"></span></div>
         <div class="stack">
           <label>People / trackers that mean “home”</label>
-          <div class="picker" data-opt="presence_entities" data-entities="person,device_tracker,group"></div>
+          <div class="picker" data-opt="presence_entities" data-entities="person,device_tracker,group,binary_sensor,input_boolean"></div>
         </div>
         <div class="field"><label>Wait this long after everyone leaves</label><span class="control"><input type="number" min="0" max="120" step="1" data-opt="away_grace_min"> min</span></div>
         <div class="field"><label>Ignore a tracker that hasn't reported for this long (0 = off)</label><span class="control"><input type="number" min="0" max="1440" step="5" data-opt="presence_stale_min"> min</span></div>

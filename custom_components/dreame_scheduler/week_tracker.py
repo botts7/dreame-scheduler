@@ -24,6 +24,7 @@ State shape (all JSON-serialisable):
       "maps": {                        # per-map (per-floor) slices
         "<key>": {
           "cleaned": {seg: "iso-ts"},        # rooms CONFIRMED cleaned this week
+          "confirmed": {seg: "iso-ts"},      # latest confirmed clean ever (NOT reset weekly)
           "unreachable": {seg: count},       # rooms skipped (door shut / not reached)
           "day_dispatched": "YYYY-MM-DD",    # last date the daily schedule fired
           "catchup_dispatched": "YYYY-MM-DD",
@@ -42,6 +43,7 @@ import logging
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
+from .history_analytics import newest_ts
 from .scheduler import DEFAULT_MAP_KEY, MAP_SCOPED_STATE_KEYS, migrate_state_to_maps
 
 _LOGGER = logging.getLogger(__name__)
@@ -139,6 +141,15 @@ class WeekTracker:
         return self._map().setdefault("cleaned", {})
 
     @property
+    def confirmed(self) -> dict:
+        """Latest confirmed clean per room (robot or ticked by hand), kept across
+        weekly resets. Seeded once from this week's credits on upgrade."""
+        slot = self._map()
+        if not isinstance(slot.get("confirmed"), dict):
+            slot["confirmed"] = dict(slot.get("cleaned") or {})
+        return slot["confirmed"]
+
+    @property
     def unreachable(self) -> dict:
         return self._map().setdefault("unreachable", {})
 
@@ -173,6 +184,7 @@ class WeekTracker:
     async def async_mark_cleaned(self, segments, ts: str) -> None:
         for seg in segments:
             self.cleaned[str(seg)] = ts
+            self.confirmed[str(seg)] = newest_ts(self.confirmed.get(str(seg)), ts) or ts
             # A confirmed clean clears any prior unreachable strike.
             self.unreachable.pop(str(seg), None)
         if segments:

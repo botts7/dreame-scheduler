@@ -62,10 +62,10 @@
       },
       "presence": {
         "title": "Presence & notifications",
-        "description": "Who counts as 'home', and where alerts go.",
+        "description": "What holds cleaning off, and where alerts go. Cleaning waits while any of these is 'home' or 'on'. It doesn't have to be people: a binary sensor or toggle helper works too (for example a helper that's on while you're awake, so it only cleans while you sleep).",
         "data": {
           "require_away": "Only clean when no one is home",
-          "presence_entities": "People / trackers that mean 'home'",
+          "presence_entities": "People, trackers or switches that mean 'don't clean now'",
           "away_grace_min": "Wait this long after everyone leaves",
           "presence_stale_min": "Ignore a tracker that hasn't reported for this long (0 = off)",
           "door_retry_enabled": "Retry a door-skipped room when its door reopens",
