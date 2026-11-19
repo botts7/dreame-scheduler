@@ -106,6 +106,8 @@ OPT_EDGE_NO_MOP: Final = "edge_no_mop"                   # bool: edge clean swee
 OPT_EDGE_LEARN: Final = "edge_learn"                     # DEPRECATED (self-tune of the removed time-cut); unused
 
 # Defaults applied to rooms that don't override
+OPT_WEEKDAY_PROFILES: Final = "weekday_profiles"
+OPT_EXTERNAL_CREDITS: Final = "external_credits"
 OPT_DEFAULT_MODE: Final = "default_mode"             # cleaning-mode select option string
 OPT_DEFAULT_SUCTION: Final = "default_suction"       # suction-level select option string
 
