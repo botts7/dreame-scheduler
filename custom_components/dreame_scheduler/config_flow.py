@@ -74,6 +74,7 @@ from .const import (
     OPT_EDGE_NO_MOP,
     OPT_DAILY_TIME,
     OPT_DEFAULT_MODE,
+    OPT_EXTERNAL_CREDITS,
     OPT_DEFAULT_SUCTION,
     OPT_GUARD_DUSTBIN,
     OPT_GUARD_WATER,
@@ -244,6 +245,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             if suctions else selector.TextSelector()
 
         schema = vol.Schema({
+            vol.Optional(OPT_EXTERNAL_CREDITS, default=self._opt(OPT_EXTERNAL_CREDITS, False)): selector.BooleanSelector(),
             vol.Optional(OPT_WINDOW_ENABLED, default=self._opt(OPT_WINDOW_ENABLED, DEFAULT_WINDOW_ENABLED)): selector.BooleanSelector(),
             vol.Optional(OPT_WINDOW_START, default=self._opt(OPT_WINDOW_START, DEFAULT_WINDOW_START)): selector.TimeSelector(),
             vol.Optional(OPT_WINDOW_END, default=self._opt(OPT_WINDOW_END, DEFAULT_WINDOW_END)): selector.TimeSelector(),

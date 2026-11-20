@@ -39,6 +39,7 @@ State shape (all JSON-serialisable):
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
@@ -270,9 +271,21 @@ class WeekTracker:
     def active_run(self) -> dict | None:
         return self._state.get("active_run")
 
+    def _remember_dispatch(self, previous, current):
+        """Retain ownership of late-arriving Dreame history after a run finishes."""
+        if current is None and previous and previous.get("started") and self._state.get("external_since"):
+            windows = self._state.setdefault("dispatch_windows", [])
+            windows.append([previous["started"], datetime.now(timezone.utc).isoformat()])
+            if len(windows) > 200:
+                # Once ownership intervals expire, never reimport their old runs.
+                cutoff = max(datetime.fromisoformat(end).timestamp() for _, end in windows[:-200])
+                self._state["external_since"] = max(self._state["external_since"], cutoff)
+                del windows[:-200]
+
     async def async_set_active_run(self, run: dict | None) -> None:
         if isinstance(run, dict):
             run.setdefault("map", self._active_map)   # tag the floor it belongs to
+        self._remember_dispatch(self.active_run, run)
         self._state["active_run"] = run
         await self.async_save()
 
@@ -409,6 +422,7 @@ class WeekTracker:
     async def async_set_edge_run(self, run: dict | None) -> None:
         if isinstance(run, dict):
             run.setdefault("map", self._active_map)   # tag the floor it belongs to
+        self._remember_dispatch(self.edge_run, run)
         self._state["edge_run"] = run
         await self.async_save()
 
