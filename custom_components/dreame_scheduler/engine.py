@@ -94,6 +94,7 @@ from .const import (
     OPT_HOLIDAY_AFTER_DAYS,
     OPT_DAILY_TIME,
     OPT_DEFAULT_MODE,
+    OPT_EXTERNAL_CREDITS,
     OPT_DEFAULT_SUCTION,
     OPT_GUARD_DUSTBIN,
     OPT_GUARD_WATER,
@@ -502,16 +503,26 @@ class SchedulerEngine:
         # room's real cleaned area can be folded into the learned estimate. In-memory
         # only (a partial observation on restart just isn't learned — no harm).
         self._area_obs: dict | None = None
+        self._external_save_pending = False
 
     # ------------------------------------------------------------------ setup
     async def async_start(self) -> None:
         await self.tracker.async_load()
+        state = self.tracker.state
+        enabled = self._opt(OPT_EXTERNAL_CREDITS, False)
+        if enabled and not state.get("external_since"):
+            state["external_since"] = dt_util.now().timestamp()
+            await self.tracker.async_save()
+        elif not enabled and state.pop("external_since", None) is not None:
+            await self.tracker.async_save()
         self._unsub.append(
             async_track_time_interval(
                 self.hass, self._handle_tick, timedelta(seconds=TICK_SECONDS)
             )
         )
         watched = [self._vacuum_entity, entity_of("sensor", self._prefix, SUF_ERROR)]
+        if enabled:
+            watched.append(entity_of("sensor", self._prefix, "cleaning_history"))
         watched += [ent for ent in self._presence_entities() if ent]
         # Door sensors: a door reopening is a trigger to retry a room we skipped.
         watched += [ent for ent in self._door_sensors() if ent]
@@ -2378,6 +2389,62 @@ class SchedulerEngine:
         except (TypeError, ValueError):
             return None
 
+    async def _credit_external_history(self, now):
+        """Reconcile completed passes under the same lock used for dispatch."""
+        from . import external_history
+        from .dreame_mapdata import resolve_coordinator
+
+        if self._external_save_pending:
+            await self.tracker.async_save()
+            self._external_save_pending = False
+        history = self.hass.states.get(entity_of("sensor", self._prefix, "cleaning_history"))
+        vacuum = self.hass.states.get(self._vacuum_entity)
+        if not history or not vacuum or self.tracker.active_map != "default":
+            return
+        state = self.tracker.state
+        since = state.get("external_since")
+        if since is None:
+            return
+        records = list(external_history.completed_passes(history.attributes, since, now.timestamp()))
+        if not records:
+            return
+        floors = vacuum.attributes.get("rooms") or {}
+        coordinator = resolve_coordinator(self.hass, self._vacuum_entity)
+        status = getattr(getattr(coordinator, "device", None), "status", None)
+        maps = getattr(status, "map_list", None) or []
+        if len(maps) != 1 or len(floors) != 1 or getattr(status, "multi_map", True):
+            return  # segment IDs are reused between floors
+        floor, rooms = next(iter(floors.items()))
+        names = {str(room["id"]): room.get("name") or str(room["id"]) for room in rooms}
+        configured = set(all_enabled_segments(self._rooms()))
+        cached = getattr(status, "_history_map_data", None) or {}
+        by_start = {int(r.date.timestamp()): cached.get(r.object_name)
+                    for r in getattr(status, "_cleaning_history", None) or [] if r.date}
+        windows = [(external_history.epoch(a), external_history.epoch(b))
+                   for a, b in state.get("dispatch_windows", [])]
+        for key, start, end, raw in records:
+            if external_history.owned_by_scheduler(start, windows):
+                continue
+            m = by_start.get(start)
+            if raw.get("map_name") and raw["map_name"].strip() != floor.strip():
+                continue
+            evidence = None
+            if m is not None and int(m.last_updated or 0) == start:
+                if m.saved_map_id is None or str(m.saved_map_id) != str(maps[0]):
+                    continue
+                evidence = {"targeted": m.active_segments, "cleaned": m.cleaned_segments}
+            ids = external_history.credit(raw, configured, set(names), evidence)
+            if not ids:
+                continue
+            item = {"end": end, "area": raw["cleaned_area"],
+                    "pad": raw.get("mop_pad"), "rooms": ids}
+            if external_history.apply_pass(state, key, item, names, now.tzinfo):
+                self._external_save_pending = True
+        if self._external_save_pending:
+            await self.tracker.async_save()
+            self._external_save_pending = False
+            self._push()
+
     def _latest_history_record(self, min_ts: float | None = None) -> dict | None:
         """The most recent cleaning-history record. Each record carries
         ``blocked_rooms`` ({segment_id: reason}) and ``cleaned_area`` — the map-
@@ -2564,6 +2631,12 @@ class SchedulerEngine:
         if self.tracker.edge_run is not None:
             await self._check_edge_run(now, away_ok)
             return
+
+        if self._opt(OPT_EXTERNAL_CREDITS, False) and self._vacuum_state() == "docked":
+            try:
+                await self._credit_external_history(now)
+            except Exception:  # History availability must not stall dispatch.
+                _LOGGER.exception("Unable to reconcile Dreame cleaning history")
 
         # No run in flight — but the robot may still be stranded out there from a
         # finished/interrupted one (or have dropped a mop pad on its way home, or

@@ -105,6 +105,8 @@ OPT_EDGE_PASSES: Final = "edge_passes"                   # int 1-3: zone-clean r
 OPT_EDGE_NO_MOP: Final = "edge_no_mop"                   # bool: edge clean sweeps only (never mop)
 OPT_EDGE_LEARN: Final = "edge_learn"                     # DEPRECATED (self-tune of the removed time-cut); unused
 
+OPT_EXTERNAL_CREDITS: Final = "external_credits"
+
 # Defaults applied to rooms that don't override
 OPT_DEFAULT_MODE: Final = "default_mode"             # cleaning-mode select option string
 OPT_DEFAULT_SUCTION: Final = "default_suction"       # suction-level select option string
