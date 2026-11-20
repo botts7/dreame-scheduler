@@ -57,7 +57,8 @@
           "stale_after_days": "Nudge after this many days without a clean",
           "default_mode": "Default cleaning mode",
           "default_suction": "Default suction",
-          "quiet_suction": "Quiet-mode suction"
+          "quiet_suction": "Quiet-mode suction",
+          "external_credits": "Credit completed cleans started outside the scheduler"
         }
       },
       "presence": {
