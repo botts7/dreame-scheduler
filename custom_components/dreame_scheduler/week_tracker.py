@@ -68,7 +68,11 @@ def _empty_state() -> dict:
         "tidy_reminded_on": None, # date we last sent a "clear the floor" reminder (once/day)
         "prerun_announced": None, # date we last sent the pre-run tidy heads-up (once/day)
         "consumable_alerted": {}, # wear-parts we've flagged as low -> {key: True}
-        "edge_run": None,         # active edge clean {segments:[...], map: key} or None
+        "edge_run": None,
+        "external_session": None,  # clean started outside the scheduler, being tracked
+        "missed_watermark": None,  # newest robot record ts already accounted for
+        "fault_watch": None,       # base fault last alerted {fault, seen, cleared_at}
+        "mop_hold_day": None,      # YYYY-MM-DD a water fault made cleaning vacuum-only         # active edge clean {segments:[...], map: key} or None
         "edge_restore": None,     # settings to put back once the robot re-docks after an edge run
         "maps": {},               # per-map slices (see module docstring); created lazily
     }
@@ -191,6 +195,52 @@ class WeekTracker:
             self._state["last_clean"] = ts
         await self.async_save()
 
+    async def async_credit_missed(self, segments, ts: str, this_week: bool) -> None:
+        """Credit a clean found after the fact. Always advances each room's
+        confirmed clean; only counts toward this week if it happened this week.
+        Never moves last_clean backwards."""
+        for seg in segments:
+            if this_week:
+                self.cleaned[str(seg)] = newest_ts(self.cleaned.get(str(seg)), ts) or ts
+                self.unreachable.pop(str(seg), None)
+            self.confirmed[str(seg)] = newest_ts(self.confirmed.get(str(seg)), ts) or ts
+        if segments:
+            self._state["last_clean"] = newest_ts(self._state.get("last_clean"), ts) or ts
+        await self.async_save()
+
+    @property
+    def fault_watch(self) -> dict | None:
+        return self._state.get("fault_watch")
+
+    async def async_set_fault_watch(self, state: dict | None) -> None:
+        if state != self._state.get("fault_watch"):
+            self._state["fault_watch"] = state
+            await self.async_save()
+
+    @property
+    def mop_hold_day(self) -> str | None:
+        return self._state.get("mop_hold_day")
+
+    async def async_set_mop_hold_day(self, day: str | None) -> None:
+        if day != self._state.get("mop_hold_day"):
+            self._state["mop_hold_day"] = day
+            await self.async_save()
+
+    @property
+    def missed_watermark(self) -> int | None:
+        return self._state.get("missed_watermark")
+
+    async def async_set_missed_watermark(self, ts: int | None) -> None:
+        """Advance (never rewind) the newest-accounted-for record timestamp."""
+        cur = self._state.get("missed_watermark")
+        if ts is None:
+            self._state["missed_watermark"] = None
+        elif cur is None or int(ts) > int(cur):
+            self._state["missed_watermark"] = int(ts)
+        else:
+            return
+        await self.async_save()
+
     # ---- stale-house nudge + resume queue ----
     @property
     def last_clean(self) -> str | None:
@@ -292,6 +342,10 @@ class WeekTracker:
     async def async_append_history(self, entry: dict, cap: int = 200) -> None:
         hist = self.history
         hist.append(entry)
+        # A catch-up row can be older than the latest one: keep the log in time
+        # order (streaks and "last cleaned" read it newest-last).
+        if len(hist) > 1 and newest_ts(hist[-2].get("ts"), entry.get("ts")) != entry.get("ts"):
+            hist.sort(key=lambda h: _sort_key(h.get("ts")))
         if len(hist) > cap:          # keep only the most recent `cap` runs
             del hist[: len(hist) - cap]
         await self.async_save()
@@ -403,6 +457,16 @@ class WeekTracker:
             await self.async_save()
 
     @property
+    def external_session(self) -> dict | None:
+        return self._state.get("external_session")
+
+    async def async_set_external_session(self, session: dict | None) -> None:
+        if isinstance(session, dict):
+            session.setdefault("map", self._active_map)
+        self._state["external_session"] = session
+        await self.async_save()
+
+    @property
     def edge_run(self) -> dict | None:
         return self._state.get("edge_run")
 
@@ -437,3 +501,11 @@ class WeekTracker:
     async def async_set_last_edge(self, iso_date: str | None) -> None:
         self._map()["last_edge"] = iso_date
         await self.async_save()
+
+
+def _sort_key(ts) -> float:
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(str(ts)).timestamp()
+    except (TypeError, ValueError):
+        return 0.0

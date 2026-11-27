@@ -221,3 +221,67 @@ def edge_strips_for_segments(geom, seg_ids, width, cap=32):
     if rects:
         return batch_rects(rects, cap), "walls"
     return [], "none"
+
+
+def _seg_from_pixel(v):
+    """Room id for a pixel_type value: ``seg`` is floor, ``100+seg`` / ``200+seg``
+    is that room's border band; anything else is outside any room."""
+    try:
+        v = int(v)
+    except (TypeError, ValueError):
+        return None
+    for base in (0, 100, 200):
+        if 1 <= v - base <= 63:
+            return v - base
+    return None
+
+
+def path_room_hits(md):
+    """Where a (saved) map's cleaning path went: ``{"points", "types",
+    "pixel": {seg: hits}, "boxes": {seg: hits}, "orientation"}``.
+
+    ``pixel`` looks each path point up in the room raster (the real room shape);
+    ``boxes`` counts points inside each room's bounding box (overlaps at
+    doorways, so only a cross-check). The raster's axis order isn't documented,
+    so both are tried and the one that agrees best with the boxes is kept.
+    Read-only; returns {} when the map lacks a path or raster."""
+    path = getattr(md, "path", None)
+    dims = _dims(md)
+    if not path or dims is None:
+        return {}
+    pts, types = [], {}
+    for p in path:
+        try:
+            x, y = float(p.x), float(p.y)
+        except Exception:  # noqa: BLE001
+            continue
+        t = getattr(getattr(p, "path_type", None), "value", None) or str(getattr(p, "path_type", "") or "")
+        types[t] = types.get(t, 0) + 1
+        pts.append((x, y, t))
+    boxes = _segment_boxes(md)
+    box_hits = {}
+    for x, y, _ in pts:
+        for sid, (_, (x0, y0, x1, y1)) in boxes.items():
+            if min(x0, x1) <= x <= max(x0, x1) and min(y0, y1) <= y <= max(y0, y1):
+                box_hits[sid] = box_hits.get(sid, 0) + 1
+    grid = getattr(md, "pixel_type", None)
+    best = {}
+    best_name = None
+    if grid is not None:
+        gs, left, top = dims["grid_size"], dims["left"], dims["top"]
+        for name in ("row_y", "row_x"):
+            hits = {}
+            for x, y, _ in pts:
+                gx, gy = int((x - left) / gs), int((y - top) / gs)
+                try:
+                    v = grid[gy][gx] if name == "row_y" else grid[gx][gy]
+                except Exception:  # noqa: BLE001
+                    continue
+                sid = _seg_from_pixel(v)
+                if sid is not None:
+                    hits[sid] = hits.get(sid, 0) + 1
+            agree = sum(min(hits.get(s, 0), box_hits.get(s, 0)) for s in hits)
+            if best_name is None or agree > best_agree:
+                best, best_name, best_agree = hits, name, agree
+    return {"points": len(pts), "types": types, "pixel": best,
+            "boxes": box_hits, "orientation": best_name}

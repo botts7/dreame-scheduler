@@ -58,8 +58,8 @@ async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> Non
 # helpers below + config_bridge/report). Torn down when the last entry is removed
 # so they don't linger in the service picker after uninstall.
 _DOMAIN_SERVICES = (
-    "run_scheduled_now", "run_catchup_now", "reset_week", "clean_rooms", "edge_clean",
-    "apply_learned_nogo", "get_config", "set_config", "get_report",
+    "run_scheduled_now", "run_catchup_now", "reset_week", "end_run", "clean_rooms", "edge_clean",
+    "apply_learned_nogo", "get_config", "set_config", "get_report", "check_saved_maps",
 )
 
 
@@ -107,6 +107,10 @@ def _async_register_services(hass: HomeAssistant) -> None:
         for eng in _engines(call):
             await eng.async_reset_week()
 
+    async def _end_run(call: ServiceCall) -> None:
+        for eng in _engines(call):
+            await eng.async_end_run()
+
     async def _clean_rooms(call: ServiceCall) -> None:
         segs = call.data.get("segments") or []
         for eng in _engines(call):
@@ -129,6 +133,12 @@ def _async_register_services(hass: HomeAssistant) -> None:
         for eng in _engines(call):
             await eng.async_show_unreachable(str(seg) if seg is not None else None)
 
+    async def _check_saved_maps(call: ServiceCall) -> dict:
+        results = []
+        for eng in _engines(call):
+            results.append(await eng.async_check_saved_maps(int(call.data.get("count", 3))))
+        return {"results": results}
+
     async def _dump_map_geometry(call: ServiceCall) -> dict:
         results = []
         for eng in _engines(call):
@@ -142,6 +152,8 @@ def _async_register_services(hass: HomeAssistant) -> None:
     hass.services.async_register(DOMAIN, "run_scheduled_now", _run_scheduled, schema=quiet_schema)
     hass.services.async_register(DOMAIN, "run_catchup_now", _run_catchup, schema=quiet_schema)
     hass.services.async_register(DOMAIN, "reset_week", _reset_week,
+                                 schema=vol.Schema({vol.Optional("vacuum"): cv.string}))
+    hass.services.async_register(DOMAIN, "end_run", _end_run,
                                  schema=vol.Schema({vol.Optional("vacuum"): cv.string}))
     hass.services.async_register(DOMAIN, "clean_rooms", _clean_rooms, schema=vol.Schema({
         vol.Required("segments"): list, vol.Optional("quiet", default=False): cv.boolean,
@@ -158,6 +170,12 @@ def _async_register_services(hass: HomeAssistant) -> None:
     hass.services.async_register(
         DOMAIN, "show_unreachable", _show_unreachable,
         schema=vol.Schema({vol.Optional("segment"): cv.string, vol.Optional("vacuum"): cv.string}),
+    )
+    hass.services.async_register(
+        DOMAIN, "check_saved_maps", _check_saved_maps,
+        schema=vol.Schema({vol.Optional("count", default=3): vol.All(vol.Coerce(int), vol.Range(min=1, max=10)),
+                           vol.Optional("vacuum"): cv.string}),
+        supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN, "dump_map_geometry", _dump_map_geometry,

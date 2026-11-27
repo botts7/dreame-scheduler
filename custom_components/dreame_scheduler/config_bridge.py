@@ -34,6 +34,7 @@ from .const import (
     DEFAULT_CATCHUP_ENABLED,
     DEFAULT_CATCHUP_TIME,
     DEFAULT_OPPORTUNISTIC_CATCHUP,
+    DEFAULT_CREDIT_EXTERNAL,
     DEFAULT_HOLIDAY_ENABLED,
     DEFAULT_HOLIDAY_AFTER_DAYS,
     DEFAULT_DAILY_TIME,
@@ -83,6 +84,7 @@ from .const import (
     OPT_CATCHUP_ENABLED,
     OPT_CATCHUP_TIME,
     OPT_OPPORTUNISTIC_CATCHUP,
+    OPT_CREDIT_EXTERNAL,
     OPT_HOLIDAY_ENABLED,
     OPT_HOLIDAY_AFTER_DAYS,
     OPT_PRESENCE_STALE_MIN,
@@ -146,6 +148,15 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 _UNAVAILABLE = ("unknown", "unavailable", "", "none")
+_BAD_OPTS = {"", "unavailable", "unknown", "none"}
+
+
+def filter_select_options(raw) -> list[str]:
+    """Drop empty and placeholder select options like 'unavailable'."""
+    return [
+        o for o in (raw or [])
+        if str(o).strip().lower() not in _BAD_OPTS
+    ]
 
 # Defaults surfaced to the GUI (so it can show + reset to them).
 _DEFAULTS: dict = {
@@ -173,6 +184,7 @@ _DEFAULTS: dict = {
     OPT_CATCHUP_TIME: DEFAULT_CATCHUP_TIME,
     OPT_OPPORTUNISTIC_CATCHUP: DEFAULT_OPPORTUNISTIC_CATCHUP,
     OPT_HOLIDAY_ENABLED: DEFAULT_HOLIDAY_ENABLED,
+    OPT_CREDIT_EXTERNAL: DEFAULT_CREDIT_EXTERNAL,
     OPT_HOLIDAY_AFTER_DAYS: DEFAULT_HOLIDAY_AFTER_DAYS,
     OPT_WEEK_START_DAY: DEFAULT_WEEK_START_DAY,
     OPT_STALE_NUDGE_ENABLED: DEFAULT_STALE_NUDGE_ENABLED,
@@ -234,6 +246,7 @@ _VALIDATORS: dict = {
     OPT_AUTO_RECOVER: bool, OPT_QUIET_RECOVERY: bool,
     OPT_CATCHUP_ENABLED: bool, OPT_OPPORTUNISTIC_CATCHUP: bool,
     OPT_HOLIDAY_ENABLED: bool,
+    OPT_CREDIT_EXTERNAL: bool,
     OPT_HOLIDAY_AFTER_DAYS: vol.All(vol.Coerce(int), vol.Range(min=1, max=60)),
     OPT_STALE_NUDGE_ENABLED: bool,
     OPT_NOTIFY_STUCK: bool, OPT_NOTIFY_SKIPPED: bool, OPT_NOTIFY_WEEKLY: bool,
@@ -290,9 +303,7 @@ def async_register_config_services(hass: HomeAssistant) -> None:
 
     def _select_options(prefix: str, suffix: str) -> list[str]:
         st = hass.states.get(f"select.{prefix}_{suffix}")
-        return list(st.attributes.get("options", [])) if st else []
-
-    _BAD_OPTS = {"", "unavailable", "unknown", "none"}
+        return filter_select_options(st.attributes.get("options", []) if st else [])
 
     def _opt_options(prefix: str, select_suffix: str, vacuum_id: str | None, list_attr: str) -> list[str]:
         """Canonical option slugs for a dreame select (cleaning mode / suction level).
@@ -307,14 +318,12 @@ def async_register_config_services(hass: HomeAssistant) -> None:
         turned to underscores (e.g. "Sweeping and mopping" -> "sweeping_and_mopping",
         matching the live select options when the robot is cleaning)."""
         st = hass.states.get(f"select.{prefix}_{select_suffix}")
-        opts = [o for o in (st.attributes.get("options", []) if st else [])
-                if str(o).strip().lower() not in _BAD_OPTS]
+        opts = filter_select_options(st.attributes.get("options", []) if st else [])
         if opts:
             return opts
         vac = hass.states.get(vacuum_id) if vacuum_id else None
         lst = (vac.attributes.get(list_attr, []) if vac else []) or []
-        return [str(o).strip().lower().replace(" ", "_") for o in lst
-                if str(o).strip().lower() not in _BAD_OPTS]
+        return [str(o).strip().lower().replace(" ", "_") for o in filter_select_options(lst)]
 
     def _discover_rooms(prefix: str) -> dict[str, str]:
         rooms: dict[str, str] = {}

@@ -369,6 +369,9 @@ function renderRooms() {
       <label><span>Suction</span>${optSelectHTML("suction", CFG.suctions, rc.suction)}</label>
       <label><span>Mop wetness <em>(blank = default)</em></span><input type="text" data-f="wetness" value="${esc(rc.wetness ?? "")}"></label>
       <label><span>Mop cadence</span>${mopEverySelectHTML(rc.mop_every)}</label>
+      <div class="wide mopdays"><span>Mop days <em>(vacuum only on the others; none ticked = use the cadence)</em></span>
+        ${WEEK.map((d, i) => `<label class="mopday"><input type="checkbox" data-mopday="${i}"${(rc.mop_days || []).includes(i) ? " checked" : ""}> ${d}</label>`).join("")}
+      </div>
       <label><span>Passes</span><input type="number" min="1" max="3" data-f="repeats" value="${esc(rc.repeats || 1)}"></label>
       <label><span>Door sensor <em>(skip when shut)</em></span>${doorSelectHTML(doorSensors, rc.door_sensor)}</label>
       <div class="wide times-editor" data-times-editor><span>Extra times <em>(clean this room more than once a day; blank = just the daily time)</em></span></div>
@@ -387,6 +390,11 @@ function renderRooms() {
     }));
     inps.forEach(inp => inp.addEventListener("change", () => {
       rc[inp.dataset.f] = inp.dataset.f === "repeats" ? Number(inp.value) : inp.value;
+    }));
+    // Mop days: mop on the ticked weekdays, vacuum only on the room's other days.
+    $$("input[data-mopday]", td).forEach(cb => cb.addEventListener("change", () => {
+      const days = $$("input[data-mopday]", td).filter(c => c.checked).map(c => Number(c.dataset.mopday));
+      if (days.length) rc.mop_days = days; else delete rc.mop_days;
     }));
     // Extra times: a repeatable list of time rows + a per-time "vacuum only" toggle.
     const teHost = $("[data-times-editor]", td);

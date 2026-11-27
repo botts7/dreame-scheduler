@@ -3,6 +3,86 @@
 All notable changes to the Dreame Scheduler integration and its companion
 add-on are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.6.6] (2026-11-27)
+
+### Integration (`custom_components/dreame_scheduler`)
+- **New (opt-in): count cleans started outside the scheduler** (#4). With
+  "Count cleans started outside the scheduler" on, a clean started from the
+  Dreame app, a voice assistant or the robot's own schedule is followed, and once
+  the robot's own record says it completed, its rooms are credited for the week:
+  a room clean credits rooms it was both asked to do and seen in (the robot can
+  be asked for a room it never reaches), a whole-house clean the rooms visited.
+  Interrupted cleans earn nothing, and blocked or skipped rooms are never
+  credited. Credited outside cleans show in the run history and the weekly
+  report, but don't count toward the "better day" suggestions. Off by default.
+  Thanks to UrbanErosion for the ideas in #5.
+- **New: catches up on cleans HA missed.** With that same setting on, a clean
+  that happened while Home Assistant was restarting or offline is found in the
+  robot's history when HA is back. Its saved cleaning map is fetched and used as
+  evidence: the map's own cleaned-room list where the model provides one,
+  otherwise rooms the clean was asked to do that the robot's recorded path
+  actually spent time in (the path includes the trip to and from the dock, so
+  a room it only drove through doesn't count). A whole-home clean, which saves
+  no room list on some models, credits the rooms its path spent time in, the
+  same as the live follower does while HA is up. Scheduled rooms only, blocked
+  or skipped rooms left out, nothing for unfinished cleans. Up to 5 per catch-up,
+  single-floor homes for now. A clean from before this week updates the room's
+  last-cleaned date but doesn't count toward this week. Approach and evidence
+  rules credit: UrbanErosion (#5, #6).
+- **Fix: an interrupted run only credits rooms it really cleaned.** When a run
+  ends early (someone came home, End current run, the 24 hour limit, an error),
+  rooms used to be credited if the robot's current-room sensor ever showed them,
+  which also happens when it just drives past. On 19 Nov that credited Lounge
+  Room2, which neither of the run's two sessions went into. It now reads the
+  saved map of every session in the run and credits rooms the recorded path
+  actually spent time in. If any session's map can't be read, it falls back to
+  the old sightings. Runs that finish normally are unchanged.
+- **New: a water fault no longer stops cleaning.** If the clean water tank runs
+  dry (or the dirty tank fills) mid-clean, the scheduler stops the halted task,
+  credits what was cleaned, and carries on with the remaining rooms vacuum only,
+  with one alert telling you what to fix. The rest of that day stays vacuum only
+  (including "Clean now"), and mopping is tried again on the next scheduled
+  clean; if the tank's still dry you get the alert again then. The robot has no
+  reliable "refilled" signal, so retrying is how it finds out. Tested on an L20:
+  it vacuums fine with a dry tank in vacuum-only mode.
+- **New: base faults alert even when no scheduler run is going.** A full dust
+  bag, a water tank problem and similar now send one alert with what to do,
+  whoever started the clean. The same fault only alerts again after it has been
+  gone for 10 minutes.
+- **Fix: the report shows your real schedule settings.** Settings left at their
+  defaults (require away, cleaning window, catch-up day and time) showed as off
+  or blank in the report and add-on, even though the scheduler was using the
+  defaults. The report now reads them exactly the way the scheduler does.
+- **Fix: single-floor homes no longer show an "unavailable" floor** in the
+  config the add-on reads.
+- **Fix: urgent alerts no longer get dropped.** "Needs help" and "blocked"
+  alerts were sent as deliver-now-or-discard, so a phone that was asleep or
+  briefly offline at that moment never got them (a blocked alert was lost this
+  way on 26 Nov). They're still high priority, but are now retried for up to 4
+  hours until the phone is reachable.
+- **Fix: alerts no longer overwrite each other in HA's notifications.** Every
+  alert used the same notification, so a new one wiped out the last. Each kind
+  of alert now has its own.
+- **Fix: a run with no saved map no longer credits rooms it only drove
+  through.** If a run ends early and the robot never saved a map for it, the
+  scheduler falls back to the rooms the robot was seen in. It now also needs the
+  robot to have spent at least a minute cleaning in that room. On 26 Nov a run
+  credited Kitchen and Kitchen Dining after passing through them in seconds on
+  the way to the Lounge Room, where it got stuck.
+- **New diagnostic: `dreame_scheduler.check_saved_maps`.** Read-only. For the
+  last few cleans it shows the rooms each saved map records and where the
+  robot's path went, the evidence the catch-up relies on.
+- **New: mop days per room** (#4). Tick the weekdays a room gets mopped and it
+  vacuums only on its other scheduled days, for "vacuum most days, mop on
+  Friday". On a mop day a room that normally defers to the robot's own setting
+  (or only sweeps) vacuums and mops together. Overrides "Mop every N cleans";
+  "Never mop" still wins. In the room options and the add-on's room editor.
+- **New: "End current run" button** (and `dreame_scheduler.end_run` service).
+  Ends the scheduler's current run straight away, for example one paused because
+  someone's home. Rooms the robot reached are credited and the rest stay
+  pending, same as when a paused run times out. Sends the robot home if it's out
+  cleaning for that run.
+
 ## [0.6.5] (2026-11-19)
 
 ### Integration (`custom_components/dreame_scheduler`)

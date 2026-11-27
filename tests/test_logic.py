@@ -512,6 +512,11 @@ check("#3: newest_ts picks the latest", ha.newest_ts("2026-10-01T10:00:00+11:00"
 check("#3: newest_ts all empty", ha.newest_ts(None, "", "bad") is None)
 check("#3: confirmation predates misses -> they count",
       ha.fails_since(_hist3, "5", "2026-09-30T10:00:00+11:00") == 4)
+_hx = [{"ts": "2026-11-10T10:00:00+11:00", "weekday": 0, "kind": "external", "per_room": {"5": {"status": "cleaned"}}},
+       {"ts": "2026-11-11T10:00:00+11:00", "weekday": 1, "kind": "daily", "per_room": {"5": {"status": "skipped"}}}]
+check("external clean left out of best-day stats", ha.weekday_stats(_hx, "5")[0]["attempts"] == 0)
+check("external clean still breaks a miss streak", ha.consecutive_fails(_hx[:1], "5") == 0)
+check("external clean counts as last cleaned", ha.last_cleaned_ts(_hx, "5") == "2026-11-10T10:00:00+11:00")
 check("#3: naive timestamp ignored, no crash", ha.fails_since(_hist3, "5", "2026-11-08T12:00:00") == 4)
 check("#3: newest_ts skips naive", ha.newest_ts("2026-11-09T12:00:00", "2026-11-08T12:00:00+11:00") == "2026-11-08T12:00:00+11:00")
 
@@ -520,6 +525,15 @@ check("hold: toggle named", sc.presence_hold_text([("input_boolean", "No Vacuum"
 check("hold: two switches", sc.presence_hold_text([("binary_sensor", "Awake"), ("input_boolean", "No Vacuum")]) == "Awake and No Vacuum are on")
 check("hold: a person home keeps the usual wording", sc.presence_hold_text([("person", "Sam"), ("input_boolean", "No Vacuum")]) is None)
 check("hold: nothing blocking", sc.presence_hold_text([]) is None)
+
+# ---- #4: per-room mop days ----
+check("mop days: none set falls back to cadence", sc.resolve_mop_days("sweeping_and_mopping", [], 0) is None)
+check("mop days: junk ignored", sc.resolve_mop_days("", ["x", 9], 0) is None)
+check("mop days: mop day keeps a mopping mode", sc.resolve_mop_days("mopping", [4], 4) == ("mopping", True))
+check("mop days: native/sweep room mops on its mop day", sc.resolve_mop_days("", [4], 4) == ("sweeping_and_mopping", True))
+check("mop days: other days vacuum only", sc.resolve_mop_days("sweeping_and_mopping", [4], 1) == ("sweeping", False))
+check("mop days: string days accepted", sc.resolve_mop_days("", ["0", "4"], 0) == ("sweeping_and_mopping", True))
+check("mop days: field kept as a room key", "mop_days" in sc._ROOM_FIELDS if hasattr(sc, "_ROOM_FIELDS") else True)
 
 print()
 print("RESULT:", "ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}")

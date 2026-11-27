@@ -27,6 +27,7 @@ from .const import (
     DEFAULT_CATCHUP_ENABLED,
     DEFAULT_CATCHUP_TIME,
     DEFAULT_OPPORTUNISTIC_CATCHUP,
+    DEFAULT_CREDIT_EXTERNAL,
     DEFAULT_HOLIDAY_ENABLED,
     DEFAULT_HOLIDAY_AFTER_DAYS,
     DEFAULT_EDGE_ENABLED,
@@ -64,6 +65,7 @@ from .const import (
     OPT_CATCHUP_ENABLED,
     OPT_CATCHUP_TIME,
     OPT_OPPORTUNISTIC_CATCHUP,
+    OPT_CREDIT_EXTERNAL,
     OPT_HOLIDAY_ENABLED,
     OPT_HOLIDAY_AFTER_DAYS,
     OPT_EDGE_ENABLED,
@@ -102,6 +104,7 @@ from .const import (
     ROOM_DOOR_SENSOR,
     ROOM_ENABLED,
     ROOM_MODE,
+    ROOM_MOP_DAYS,
     ROOM_MOP_EVERY,
     ROOM_REPEATS,
     ROOM_SUCTION,
@@ -261,6 +264,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             vol.Optional(OPT_CATCHUP_TIME, default=self._opt(OPT_CATCHUP_TIME, DEFAULT_CATCHUP_TIME)): selector.TimeSelector(),
             vol.Optional(OPT_OPPORTUNISTIC_CATCHUP, default=self._opt(OPT_OPPORTUNISTIC_CATCHUP, DEFAULT_OPPORTUNISTIC_CATCHUP)): selector.BooleanSelector(),
             vol.Optional(OPT_HOLIDAY_ENABLED, default=self._opt(OPT_HOLIDAY_ENABLED, DEFAULT_HOLIDAY_ENABLED)): selector.BooleanSelector(),
+            vol.Optional(OPT_CREDIT_EXTERNAL, default=self._opt(OPT_CREDIT_EXTERNAL, DEFAULT_CREDIT_EXTERNAL)): selector.BooleanSelector(),
             vol.Optional(OPT_HOLIDAY_AFTER_DAYS, default=self._opt(OPT_HOLIDAY_AFTER_DAYS, DEFAULT_HOLIDAY_AFTER_DAYS)): selector.NumberSelector(
                 selector.NumberSelectorConfig(min=1, max=60, step=1, unit_of_measurement="days", mode=selector.NumberSelectorMode.BOX)),
             vol.Optional(OPT_WEEK_START_DAY, default=str(self._opt(OPT_WEEK_START_DAY, DEFAULT_WEEK_START_DAY))): selector.SelectSelector(
@@ -370,6 +374,10 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 entry[ROOM_MOP_EVERY] = max(0, int(user_input.get(ROOM_MOP_EVERY, 1)))
             except (TypeError, ValueError):
                 entry[ROOM_MOP_EVERY] = 1
+            # Mop days: mop on these weekdays, vacuum only on the room's others.
+            mop_days = [int(d) for d in user_input.get(ROOM_MOP_DAYS, [])]
+            if mop_days:
+                entry[ROOM_MOP_DAYS] = mop_days
             # Extra clean times (multiple cleans per day) are edited in the next
             # step (a time picker you add one at a time). Carry the room's current
             # times in, and stash the half-built entry for that step to finish.
@@ -408,6 +416,9 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             vol.Optional(ROOM_SUCTION, default=cur.get(ROOM_SUCTION, "")): suction_sel,
             vol.Optional(ROOM_WETNESS, default=str(cur.get(ROOM_WETNESS, "") or "")): selector.TextSelector(),
             vol.Optional(ROOM_MOP_EVERY, default=str(_int_or(cur.get(ROOM_MOP_EVERY), 1))): mop_every_sel,
+            vol.Optional(ROOM_MOP_DAYS, default=[str(d) for d in cur.get(ROOM_MOP_DAYS, [])]): selector.SelectSelector(
+                selector.SelectSelectorConfig(options=_WEEKDAY_OPTIONS, multiple=True,
+                                              mode=selector.SelectSelectorMode.LIST)),
             vol.Optional(ROOM_REPEATS, default=cur.get(ROOM_REPEATS, 1)): selector.NumberSelector(
                 selector.NumberSelectorConfig(min=1, max=3, step=1, mode=selector.NumberSelectorMode.BOX)),
         }

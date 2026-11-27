@@ -61,6 +61,24 @@ reset_week:
           integration: dreame_vacuum
           domain: vacuum
 
+end_run:
+  name: End current run
+  description: >-
+    End the scheduler's current run now (for example one paused because someone
+    is home). Rooms the robot reached are credited; the rest stay pending. Sends
+    the robot home if it's out cleaning for this run.
+  fields:
+    vacuum:
+      name: Vacuum
+      description: >-
+        Target a specific robot in a multi-vacuum home. Leave empty for all.
+      required: false
+      example: vacuum.dreamebot_l20_ultra
+      selector:
+        entity:
+          integration: dreame_vacuum
+          domain: vacuum
+
 clean_rooms:
   name: Clean specific rooms now
   description: >-
@@ -192,6 +210,33 @@ get_report:
     run history) for the Report tab. Intended for the add-on GUI; returns a
     response.
   fields:
+    vacuum:
+      name: Vacuum
+      description: Target a specific robot in a multi-vacuum home.
+      required: false
+      example: vacuum.dreamebot_l20_ultra
+      selector:
+        entity:
+          integration: dreame_vacuum
+          domain: vacuum
+
+check_saved_maps:
+  name: Check saved cleaning maps
+  description: >-
+    Read-only diagnostic. Fetches the robot's saved map for its most recent
+    cleans and reports which rooms each one shows as cleaned (the evidence used
+    to credit cleans that happened while Home Assistant wasn't running).
+    Changes nothing in the scheduler or on the robot (the maps it fetches are
+    cached by the Dreame integration, as when you view a past clean's map).
+  fields:
+    count:
+      name: How many recent cleans
+      required: false
+      default: 3
+      selector:
+        number:
+          min: 1
+          max: 10
     vacuum:
       name: Vacuum
       description: Target a specific robot in a multi-vacuum home.

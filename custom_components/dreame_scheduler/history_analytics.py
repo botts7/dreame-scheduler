@@ -6,7 +6,7 @@ Each history entry looks like::
     {
       "ts": "iso",
       "weekday": 0-6,                       # Mon=0 .. Sun=6
-      "kind": "daily|catchup|manual",
+      "kind": "daily|catchup|manual|external",   # external = started outside the scheduler
       "per_room": {
         "<seg>": {"status": "cleaned"|"skipped"|"failed", "reason": str|None, ...}
       }
@@ -67,6 +67,8 @@ def weekday_stats(history: list, seg: str) -> dict:
     """Per-weekday {"attempts", "cleaned"} counts for a room."""
     stats = {d: {"attempts": 0, "cleaned": 0} for d in range(7)}
     for entry in history:
+        if entry.get("kind") == "external":
+            continue    # not a scheduled attempt: mustn't skew the best-day stats
         r = _room(entry, seg)
         if r is None:
             continue

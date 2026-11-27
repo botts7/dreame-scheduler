@@ -46,6 +46,7 @@ OPT_CATCHUP_TIME: Final = "catchup_time"             # "HH:MM"
 OPT_OPPORTUNISTIC_CATCHUP: Final = "opportunistic_catchup"  # bool: catch up pending
                                                     # rooms on ANY empty day (from the
                                                     # catch-up time), not just catchup_day
+OPT_CREDIT_EXTERNAL: Final = "credit_external"      # bool: credit cleans started outside the scheduler
 OPT_HOLIDAY_ENABLED: Final = "holiday_enabled"      # bool: pause cleaning on a long absence
 OPT_HOLIDAY_AFTER_DAYS: Final = "holiday_after_days" # int: days away (house already clean)
                                                     # before cleaning pauses ("holiday")
@@ -160,6 +161,7 @@ ROOM_WETNESS: Final = "wetness"
 ROOM_REPEATS: Final = "repeats"
 ROOM_DOOR_SENSOR: Final = "door_sensor"
 ROOM_MOP_EVERY: Final = "mop_every"     # mop every Nth sweep-day (1=every clean, 2=every 2nd, ...)
+ROOM_MOP_DAYS: Final = "mop_days"       # weekdays (0=Mon..6=Sun) this room mops; vacuum-only on its other days
 ROOM_TIMES: Final = "times"             # optional extra clean slots: [{"at": "HH:MM", "mop": bool}, ...]
                                         # empty/absent -> room follows the global daily_time (default)
 
@@ -179,6 +181,7 @@ DEFAULT_CATCHUP_ENABLED: Final = True
 DEFAULT_CATCHUP_DAY: Final = 5          # Saturday
 DEFAULT_CATCHUP_TIME: Final = "10:00"
 DEFAULT_OPPORTUNISTIC_CATCHUP: Final = False   # opt-in: off = only the weekly catch-up day
+DEFAULT_CREDIT_EXTERNAL: Final = False         # opt-in: credit completed app/voice/robot-scheduled cleans
 DEFAULT_HOLIDAY_ENABLED: Final = False         # opt-in: off = clean every empty day as usual
 DEFAULT_HOLIDAY_AFTER_DAYS: Final = 3          # pause after 3 continuous days away + house clean
 DEFAULT_WEEK_START_DAY: Final = 0       # Monday

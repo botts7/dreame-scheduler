@@ -42,7 +42,7 @@ DEFAULT_MAP_KEY = "default"
 # room-config field names, used to tell a legacy flat {seg: cfg} dict apart from
 # the nested {map: {seg: cfg}} shape.
 _ROOM_FIELDS = frozenset({"enabled", "days", "mode", "suction", "wetness",
-                          "repeats", "door_sensor", "times", "mop_every", "name"})
+                          "repeats", "door_sensor", "times", "mop_every", "mop_days", "name"})
 
 # per-room / per-day state that collides across maps and must live under maps[key].
 MAP_SCOPED_STATE_KEYS = (
@@ -287,6 +287,32 @@ def advance_mop_cadence(
         return count, base, is_mopping_mode(base)
     will_mop = (count % n == 0)
     return count, (base if will_mop else SWEEP_ONLY_MODE), will_mop
+
+
+# Mode used on a mop day when the room's own mode doesn't mop (e.g. it defers
+# to the robot's native setting, or is set to sweep): vacuum and mop together.
+MOP_DAY_MODE = "sweeping_and_mopping"
+
+
+def resolve_mop_days(base_mode, mop_days, weekday: int) -> tuple[str, bool] | None:
+    """Per-room "mop on these weekdays" (#4): ``(mode, will_mop)`` for today, or
+    None when the room has no mop days set (the mop-every-N cadence applies).
+
+    On a mop day the room's own mode is kept if it already mops, otherwise it
+    vacuums and mops together; on any other scheduled day it vacuums only."""
+    days = set()
+    for d in (mop_days or []):
+        try:
+            days.add(int(d))
+        except (TypeError, ValueError):
+            continue
+    days &= set(range(7))
+    if not days:
+        return None
+    if weekday in days:
+        base = str(base_mode or "")
+        return (base if is_mopping_mode(base) else MOP_DAY_MODE), True
+    return SWEEP_ONLY_MODE, False
 
 
 def door_open_long_enough(

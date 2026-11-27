@@ -37,6 +37,7 @@ from .const import (
     DEFAULT_CATCHUP_ENABLED,
     DEFAULT_CATCHUP_TIME,
     DEFAULT_OPPORTUNISTIC_CATCHUP,
+    DEFAULT_CREDIT_EXTERNAL,
     DEFAULT_HOLIDAY_ENABLED,
     DEFAULT_HOLIDAY_AFTER_DAYS,
     DEFAULT_DAILY_TIME,
@@ -90,6 +91,7 @@ from .const import (
     OPT_CATCHUP_ENABLED,
     OPT_CATCHUP_TIME,
     OPT_OPPORTUNISTIC_CATCHUP,
+    OPT_CREDIT_EXTERNAL,
     OPT_HOLIDAY_ENABLED,
     OPT_HOLIDAY_AFTER_DAYS,
     OPT_DAILY_TIME,
@@ -146,6 +148,7 @@ from .const import (
     ROOM_DOOR_SENSOR,
     ROOM_ENABLED,
     ROOM_MODE,
+    ROOM_MOP_DAYS,
     ROOM_MOP_EVERY,
     ROOM_REPEATS,
     ROOM_SUCTION,
@@ -174,8 +177,14 @@ from .mop_lost import is_mop_lost, plan_send as mop_lost_plan_send
 from .offline_hold import OFFLINE_REASON, hold_notice, robot_online
 from .run_resume import resume_with_start, stuck_flag_on_pause_change, task_words_stale
 from .parked_fault import fault_fix, parked_fault, plan as parked_fault_plan
+from . import external_session as ext_sess
+from . import missed_cleans as missed
+from . import fault_watch
+from . import notify_payload
+from . import room_dwell
 from .scheduler import (
     advance_mop_cadence,
+    resolve_mop_days,
     active_map_key,
     rooms_for_map,
     all_enabled_segments,
@@ -1033,6 +1042,247 @@ class SchedulerEngine:
         self._set_status("error", f"can't set up at the dock — {raw}")
         return True
 
+    async def _track_external_session(self, now: datetime) -> bool:
+        """Follow a clean the scheduler didn't start and, once the robot's own
+        record says it completed, credit its rooms (never blocked ones). Returns
+        True while a session is being followed, so nothing is dispatched over it."""
+        sess = self.tracker.external_session
+        if not bool(self._opt(OPT_CREDIT_EXTERNAL, DEFAULT_CREDIT_EXTERNAL)):
+            if sess is not None:
+                await self.tracker.async_set_external_session(None)
+            return False
+        va = self.hass.states.get(self._vacuum_entity)
+        attrs = va.attributes if va else {}
+        segs = _plain_attr(attrs.get("active_segments"))
+        segs = list(segs) if isinstance(segs, (list, tuple)) else []
+        if self._escaped_cleaning():
+            if sess is None:
+                sess = ext_sess.open_session(now.isoformat(), self._cleaning_count(),
+                                             self._newest_record_ts(), segs,
+                                             attrs.get("startup_method"))
+                _LOGGER.info("external clean started (%s), following it", sess.get("how") or "unknown")
+            before = (list(sess["segments"]), list(sess["visited"]), sess.get("parked_since"))
+            ext_sess.note_progress(sess, segs, attrs.get("current_segment"))
+            sess["parked_since"] = None
+            if (sess["segments"], sess["visited"], None) != before or self.tracker.external_session is None:
+                await self.tracker.async_set_external_session(sess)
+            self._set_status("running", "following a clean started outside the scheduler")
+            return True
+        if sess is None:
+            return False
+        if self._robot_busy():          # returning, or a mid-task dock visit
+            self._set_status("running", "following a clean started outside the scheduler")
+            return True
+        if not sess.get("parked_since"):
+            sess["parked_since"] = now.isoformat()
+            await self.tracker.async_set_external_session(sess)
+        parked = _parse_iso(sess.get("parked_since"))
+        parked_s = (now - parked).total_seconds() if parked else 0
+        record = ext_sess.record_for_session(sess, self._latest_history_record())
+        action = ext_sess.close_action(parked_s, record)
+        if action == "wait":
+            self._set_status("running", "outside clean finishing up")
+            return True
+        rooms = ext_sess.rooms_to_credit(sess, record) if action == "credit" else []
+        await self.tracker.async_set_external_session(None)
+        if record is not None:
+            # This session's record is accounted for; a later one (if it only
+            # synced after we gave up) is left to the missed-clean catch-up.
+            await self.tracker.async_set_missed_watermark(int(record.get("timestamp") or 0))
+        if rooms:
+            await self.tracker.async_mark_cleaned(rooms, now.isoformat())
+            await self.tracker.async_append_history(
+                ext_sess.history_entry(now.isoformat(), now.weekday(), rooms, sess.get("how")))
+            _LOGGER.info("external clean credited: %s", rooms)
+            self._push()
+            await self._sync_manual_clean(now)
+        else:
+            _LOGGER.info("external clean ended without credit (%s)", action)
+        return False
+
+    async def async_check_saved_maps(self, count: int = 3) -> dict:
+        """Read-only diagnostic: for the newest ``count`` robot records, fetch
+        each saved cleaning map and report the rooms it shows as cleaned. This
+        is the evidence the missed-clean catch-up relies on. Changes nothing."""
+        from .dreame_mapdata import resolve_coordinator
+        hist = self.hass.states.get(entity_of("sensor", self._prefix, "cleaning_history"))
+        all_recs = missed.records(hist.attributes if hist else {})
+        device = getattr(resolve_coordinator(self.hass, self._vacuum_entity), "device", None)
+        fetch = getattr(device, "history_map", None)
+        out = []
+        for idx, (ts, rec) in enumerate(all_recs[:max(1, min(int(count), 10))], start=1):
+            row = {"index": idx, "timestamp": ts, "completed": rec.get("completed"),
+                   "interrupt_reason": rec.get("interrupt_reason")}
+            if not callable(fetch):
+                row["error"] = "dreame_vacuum has no history_map()"
+            else:
+                try:
+                    m = await self.hass.async_add_executor_job(fetch, idx)
+                    row["map_found"] = m is not None
+                    if m is not None:
+                        row["map_matches_record"] = missed.map_matches(getattr(m, "last_updated", None), ts)
+                        row["cleaned_segments"] = _plain_attr(getattr(m, "cleaned_segments", None))
+                        row["active_segments"] = _plain_attr(getattr(m, "active_segments", None))
+                        from .dreame_mapdata import path_room_hits
+                        row["path"] = path_room_hits(m)
+                except Exception as exc:  # noqa: BLE001
+                    row["error"] = str(exc)
+            out.append(row)
+        return {"records": out}
+
+    async def _run_path_rooms(self, run: dict) -> set[str] | None:
+        """Rooms the robot's recorded path really spent time in, across every
+        session of this run (a step-aside or recharge splits one run into
+        several). None when there's no map evidence at all.
+
+        The current-room sensor isn't proof a room was cleaned: live 2026-11-19
+        it flicked to Lounge Room2 as the robot passed, and the interrupted run
+        credited it, while both sessions' paths show 0 points in that room."""
+        from .dreame_mapdata import path_room_hits, resolve_coordinator
+        device = getattr(resolve_coordinator(self.hass, self._vacuum_entity), "device", None)
+        fetch = getattr(device, "history_map", None)
+        if not callable(fetch):
+            return None
+        hist = self.hass.states.get(entity_of("sensor", self._prefix, "cleaning_history"))
+        all_recs = missed.records(hist.attributes if hist else {})
+        started = _parse_iso(run.get("started"))
+        mine = missed.run_records(all_recs, run.get("record_ts_at_start"),
+                                  started.timestamp() if started else None)
+        # All-or-nothing: evidence missing for any one session would drop the
+        # rooms that session cleaned, so then fall back to the sightings.
+        if not mine or len(mine) > missed.MAX_RUN_SESSIONS:
+            return None
+        rooms: set[str] = set()
+        for ts, _rec in mine:
+            idx = missed.history_index(all_recs, ts)
+            try:
+                m = await self.hass.async_add_executor_job(fetch, idx) if idx else None
+            except Exception:  # noqa: BLE001
+                m = None
+            if m is None or not missed.map_matches(getattr(m, "last_updated", None), ts):
+                return None
+            listed = {str(x) for x in (_plain_attr(getattr(m, "cleaned_segments", None)) or []) if str(x).isdigit()}
+            if listed:
+                rooms |= listed
+                continue
+            trail = await self.hass.async_add_executor_job(path_room_hits, m)
+            if not trail:
+                return None
+            rooms |= missed.path_rooms(trail.get("pixel"), trail.get("points"))
+        return rooms
+
+    async def _track_room_dwell(self, run: dict, now: datetime) -> None:
+        """Add the time since the last evaluation to the room the robot is in,
+        while it's actually cleaning. Saved with the run so a restart keeps it."""
+        # The time since the last evaluation belongs to where the robot WAS
+        # (and whether it was cleaning then), not where it is now: a room
+        # change triggers an evaluation, and crediting the new room would hand
+        # a drive-through room up to a minute.
+        last = _parse_iso(run.get("dwell_at"))
+        prev_room, prev_cleaning = run.get("dwell_room"), bool(run.get("dwell_cleaning"))
+        run["dwell_at"] = now.isoformat()
+        run["dwell_room"] = self._sval(entity_of("sensor", self._prefix, "current_room"))
+        # Out on the floor cleaning, not washing pads at the dock (which also
+        # reads "cleaning" and would give the dock's room time it didn't clean).
+        run["dwell_cleaning"] = self._escaped_cleaning()
+        if last is None or not prev_cleaning:
+            return
+        before = run.get("dwell") or {}
+        run["dwell"] = room_dwell.add(before, prev_room, (now - last).total_seconds())
+        if run["dwell"] != before:
+            await self.tracker.async_set_active_run(run)
+
+    async def _catch_up_missed(self, now: datetime) -> None:
+        """Credit cleans that happened while HA wasn't watching (restart, outage).
+
+        Robot records newer than the watermark, seen while nothing is running,
+        are missed cleans. Each one's saved map is fetched from the Dreame
+        integration and only the rooms it shows as cleaned are credited (see
+        missed_cleans; approach credit: UrbanErosion, PR #5/#6). Opt-in with the
+        outside-clean credit setting; single floor only (room ids repeat across
+        floors)."""
+        if not bool(self._opt(OPT_CREDIT_EXTERNAL, DEFAULT_CREDIT_EXTERNAL)):
+            return
+        if (self.tracker.active_run is not None or self.tracker.external_session is not None
+                or self.tracker.edge_run is not None or self._robot_busy()
+                or self._vacuum_state() is None):
+            return
+        if now.timestamp() < getattr(self, "_missed_retry_at", 0):
+            return
+        hist = self.hass.states.get(entity_of("sensor", self._prefix, "cleaning_history"))
+        all_recs = missed.records(hist.attributes if hist else {})
+        if not all_recs:
+            return
+        if self.tracker.missed_watermark is None:
+            # Just switched on: start from now, never back-credit old history.
+            await self.tracker.async_set_missed_watermark(max(all_recs[0][0], int(now.timestamp())))
+            return
+        newest = all_recs[0][0]
+        if newest <= int(self.tracker.missed_watermark):
+            return
+        todo = missed.pending(all_recs, self.tracker.missed_watermark)
+        if not todo:
+            # Newer records, but none completed: nothing can ever be credited.
+            await self.tracker.async_set_missed_watermark(newest)
+            return
+        va = self.hass.states.get(self._vacuum_entity)
+        floors = _plain_attr(va.attributes.get("rooms")) if va else None
+        if self.tracker.active_map != "default" or not isinstance(floors, dict) or len(floors) != 1:
+            await self.tracker.async_set_missed_watermark(newest)   # multi-floor: not supported yet
+            return
+        from .dreame_mapdata import resolve_coordinator
+        device = getattr(resolve_coordinator(self.hass, self._vacuum_entity), "device", None)
+        fetch = getattr(device, "history_map", None)
+        if not callable(fetch):
+            await self.tracker.async_set_missed_watermark(newest)
+            return
+        configured = set(all_enabled_segments(self._rooms()))
+        week_start = self.tracker.week_start
+        tries = getattr(self, "_missed_tries", None)
+        if tries is None:
+            tries = self._missed_tries = {}
+        for ts, rec in todo:
+            idx = missed.history_index(all_recs, ts)
+            error = None
+            try:
+                map_data = await self.hass.async_add_executor_job(fetch, idx) if idx else None
+            except Exception as exc:  # noqa: BLE001
+                map_data, error = None, exc
+            if map_data is None:
+                # No map can be a cloud blip: retry later, but give up on this
+                # record after a few tries rather than calling the cloud forever.
+                tries[ts] = tries.get(ts, 0) + 1
+                if tries[ts] < missed.MAX_FETCH_TRIES:
+                    _LOGGER.info("missed clean at %s: saved map not available (%s), will retry", ts, error)
+                    self._missed_retry_at = now.timestamp() + missed.RETRY_SECONDS
+                    return
+                _LOGGER.info("missed clean at %s: no saved map after %s tries, no credit", ts, tries[ts])
+                tries.pop(ts, None)
+                await self.tracker.async_set_missed_watermark(ts)
+                continue
+            tries.pop(ts, None)
+            if not missed.map_matches(getattr(map_data, "last_updated", None), ts):
+                _LOGGER.info("missed clean at %s: saved map belongs to another clean, no credit", ts)
+                await self.tracker.async_set_missed_watermark(ts)
+                continue
+            from .dreame_mapdata import path_room_hits
+            trail = await self.hass.async_add_executor_job(path_room_hits, map_data)
+            rooms = missed.rooms_to_credit(
+                rec, getattr(map_data, "cleaned_segments", None), configured,
+                asked=_plain_attr(getattr(map_data, "active_segments", None)),
+                path_hits=(trail or {}).get("pixel"), total_points=(trail or {}).get("points"))
+            await self.tracker.async_set_missed_watermark(ts)
+            if not rooms:
+                continue
+            when = missed.record_time(ts, now.tzinfo)
+            this_week = bool(week_start) and when[:10] >= str(week_start)
+            await self.tracker.async_credit_missed(rooms, when, this_week)
+            entry = ext_sess.history_entry(when, datetime.fromisoformat(when).weekday(), rooms, "found in the robot's history")
+            await self.tracker.async_append_history(entry)
+            _LOGGER.info("missed clean credited from its saved map: %s at %s", rooms, when)
+            self._push()
+        await self._sync_manual_clean(now)
+
     async def _watch_parked_fault(self, run: dict, now: datetime) -> bool:
         """A fault that halted the task with the vacuum reading `paused`, not
         `error` (e.g. water_tank_dry at the dock). Alert once, and close the run
@@ -1053,6 +1303,11 @@ class SchedulerEngine:
         label = str((va.attributes.get("error") if va else None) or raw)
         rooms = ", ".join(self._room_name(str(s)) for s in run.get("segments", [])) or "the run"
         action = parked_fault_plan(held, bool(run.get("notified_fault")))
+        if action in ("alert", "close") and fault_watch.kind(raw) == "water":
+            # Only mopping is blocked: stop the halted task and carry on vacuum
+            # only for the rest of today; mopping is tried again tomorrow.
+            await self._carry_on_vacuum_only(run, now, raw, label, rooms)
+            return True
         if action == "close":
             _LOGGER.warning("closing run halted by %s for %.0f s", raw, held)
             await self._finalize_run(run, now, interrupted=True)
@@ -1075,6 +1330,45 @@ class SchedulerEngine:
                 )
         self._set_status("waiting", f"halted: {label}")
         return True
+
+    async def _carry_on_vacuum_only(self, run: dict, now: datetime, raw: str, label: str, rooms: str) -> None:
+        """A water fault halted a run. Stop the halted task (on the L20 that
+        also clears the error), end the run (rooms it really cleaned are
+        credited, the rest go to the resume queue), and make the rest of today
+        vacuum-only so the resume goes out without mopping. Tested live
+        2026-11-22: the L20 vacuums with a dry tank in vacuum-only mode."""
+        today = now.date().isoformat()
+        await self.tracker.async_set_mop_hold_day(today)
+        await self.tracker.async_set_fault_watch({"fault": str(raw).strip().lower(),
+                                                  "seen": now.timestamp(), "cleared_at": None})
+        _LOGGER.warning("water fault %s: carrying on vacuum only for today", raw)
+        await self._svc("vacuum", "stop", {"entity_id": self._vacuum_entity})
+        await self._finalize_run(run, now, interrupted=True)
+        if bool(self._opt(OPT_NOTIFY_STUCK, DEFAULT_NOTIFY_STUCK)):
+            await self._notify(
+                f"Vacuum: {label}, carrying on vacuum only",
+                f"{fault_watch.fix(raw)} Until then it'll finish {rooms} and the rest of "
+                "today's cleaning without mopping. Mopping is tried again on the next "
+                "scheduled clean.",
+                high_priority=True,
+            )
+        self._set_status("waiting", f"vacuum only today: {label}")
+
+    async def _watch_station_fault(self, now: datetime) -> None:
+        """Alert once about a base fault (dust bag full, water tanks, ...) the
+        robot reports when no scheduler run owns it. Live 2026-11-22 a dust bag
+        filled up after an app-started clean and nobody was told."""
+        run = self.tracker.active_run
+        raw = self._error_text()
+        k = fault_watch.kind(raw)
+        if run is not None and (k == "water" or self._vacuum_state() == "paused"):
+            return      # the run's own fault handling owns these
+        send, state = fault_watch.idle_alert(self.tracker.fault_watch, raw, now.timestamp())
+        await self.tracker.async_set_fault_watch(state)
+        if send and bool(self._opt(OPT_NOTIFY_STUCK, DEFAULT_NOTIFY_STUCK)):
+            va = self.hass.states.get(self._vacuum_entity)
+            label = str((va.attributes.get("error") if va else None) or raw)
+            await self._notify(f"Vacuum: {label}", fault_watch.fix(raw), high_priority=True)
 
     async def _watch_mop_lost(self, now: datetime, run: dict | None = None) -> bool:
         """A mop pad came off out on the floor (robot in error with 'mop_removed').
@@ -2555,6 +2849,12 @@ class SchedulerEngine:
         except Exception as exc:  # noqa: BLE001
             _LOGGER.warning("offline-hold tracking failed: %s", exc)
 
+        # 2f) A base fault (dust bag, tanks) no run is handling: tell someone once.
+        try:
+            await self._watch_station_fault(now)
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning("station-fault watch failed: %s", exc)
+
         # 3) A run is in flight → verify/await it; never dispatch concurrently.
         if self.tracker.active_run is not None:
             await self._check_active_run(now, away_ok)
@@ -2578,6 +2878,19 @@ class SchedulerEngine:
                 await self._watch_stranded(now)
             except Exception as exc:  # noqa: BLE001
                 _LOGGER.warning("stranded watch failed: %s", exc)
+
+        # A clean started outside the scheduler (app, voice, robot schedule):
+        # follow it and credit the rooms it really finished (opt-in, #4). After
+        # the stranded / mop-pad watches so those still cover it.
+        try:
+            if await self._track_external_session(now):
+                return
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning("external-clean tracking failed: %s", exc)
+        try:
+            await self._catch_up_missed(now)
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning("missed-clean catch-up failed: %s", exc)
 
         # Pre-run tidy heads-up (once/day, at the user's chosen trigger) — best-
         # effort, never let it block the schedule.
@@ -2965,8 +3278,16 @@ class SchedulerEngine:
         ``sweep_only`` is a set of segment-ids to clean sweep-only this run
         regardless of their mop cadence (a per-room "vacuum only" extra pass)."""
         sweep_only = set(sweep_only or ())
+        if fault_watch.mop_hold_active(self.tracker.mop_hold_day, now.date().isoformat()):
+            # A water fault hit earlier today: vacuum only until tomorrow.
+            sweep_only |= {str(s) for s in segments}
         seg_names = {str(s): self._room_name(s) for s in segments}
         quiet_suction = self._opt(OPT_QUIET_SUCTION, "")
+
+        # Our own run takes over; a half-followed outside clean must not later
+        # be credited from this run's history record.
+        if self.tracker.external_session is not None:
+            await self.tracker.async_set_external_session(None)
 
         # Claim the run BEFORE any service call — a concurrent evaluation must
         # see active_run set, or both dispatch. count_at_start and the newest-
@@ -3031,6 +3352,12 @@ class SchedulerEngine:
                     base_mode, mop_every, prev.get("count"), prev.get("date"), today_iso)
                 if is_mopping_mode(base_mode) and mop_every > 1:
                     await self.tracker.async_set_mop_counter(seg, count, today_iso)
+                # Per-room mop days (#4) override the cadence: mop on the ticked
+                # weekdays, vacuum only on the rest. "Never mop" (N=0) still wins
+                # (carpet safety).
+                by_day = resolve_mop_days(base_mode, cfg.get(ROOM_MOP_DAYS), now.weekday())
+                if by_day is not None and mop_every != 0:
+                    mode, will_mop = by_day
                 # A per-room "vacuum only" extra-time slot forces sweep-only for
                 # this pass, whatever the cadence resolved (composes with never-mop).
                 if str(seg) in sweep_only:
@@ -3091,6 +3418,10 @@ class SchedulerEngine:
         # breakpoint anyway. (Live 2026-08-12: a 'mop install failed' run went
         # suspended+errored and sat wedged ~9 h; SUSPEND_MAX_SECONDS is a 24 h
         # backstop, far too slow to unblock the next day's run.)
+        # Cleaning time per room, for the sightings fallback when a run ends
+        # early with no saved map to check (see room_dwell).
+        await self._track_room_dwell(run, now)
+
         st = self.hass.states.get(self._vacuum_entity)
         servicing = bool(st and (st.attributes.get("washing") or st.attributes.get("drying")))
         if (run.get("errored") and not run.get("recovering")
@@ -3447,6 +3778,10 @@ class SchedulerEngine:
 
     async def _finalize_run(self, run: dict, now: datetime, *, record: dict | None = None,
                             failed_start: bool = False, interrupted: bool = False) -> None:
+        # Everything the robot logged up to now belongs to this run (even a
+        # record that syncs late carries this run's start time), so the
+        # missed-clean catch-up must never treat it as an outside clean.
+        await self.tracker.async_set_missed_watermark(int(now.timestamp()))
         targets = [str(s) for s in run.get("segments", [])]
         seg_names = run.get("seg_names", {})
         ts = now.isoformat()
@@ -3473,6 +3808,20 @@ class SchedulerEngine:
         cleaned, skipped = [], []
         visited = set(run.get("visited", []))
         error_active = self._error_active()
+        # Where the robot's own recorded path says it actually went. Only needed
+        # when we can't trust a completed full pass; the current-room sightings
+        # stay as the fallback when no saved map can be read.
+        path_rooms = None
+        in_progress = False
+        if not failed_start and (interrupted or run.get("errored") or error_active
+                                 or record is None or record.get("completed") is False):
+            try:
+                path_rooms = await self._run_path_rooms(run)
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.debug("path evidence unavailable: %s", exc)
+            # A session still under way at this moment has no record yet: keep
+            # the sightings for it rather than dropping rooms it is doing now.
+            in_progress = self._escaped_cleaning() or bool(run.get("ended_while_out"))
         # Area sanity: a run that swept an implausibly small total area didn't
         # really clean, even if the record says "completed" (e.g. it left the
         # dock, cleaned ~1 sq m, and returned). Don't bank rooms on the trusted-
@@ -3484,6 +3833,11 @@ class SchedulerEngine:
         for seg in targets:
             name = seg_names.get(seg)
             seen = bool(visited and name and name in visited)
+            # A sighting only counts with real cleaning time in the room: a
+            # drive-through to another room is seconds (live 2026-11-26).
+            seen = seen and room_dwell.counts(run.get("dwell"), name)
+            if path_rooms is not None:
+                seen = seg in path_rooms or (in_progress and seen)
             if failed_start:
                 skipped.append(seg)
             elif seg in blocked:
@@ -4061,6 +4415,29 @@ class SchedulerEngine:
             return
         await self._dispatch_clean(reachable, kind, now, quiet=quiet)
 
+    async def async_end_run(self) -> None:
+        """Manual: end the scheduler's current run now, as interrupted.
+
+        Same outcome as the 24 h watchdog, on demand: rooms the robot actually
+        reached are credited (from its record when one landed), the rest stay
+        pending. If the robot is out cleaning for this run it's sent home."""
+        self._sync_active_map()
+        async with self._eval_lock:
+            run = self.tracker.active_run
+            if run is None:
+                self._set_status(self._status.get("state", "idle"), "no run to end")
+                return
+            now = dt_util.now()
+            if self._escaped_cleaning():
+                # Its current session has no record yet; finalize keeps the
+                # sightings for it (see _finalize_run).
+                run["ended_while_out"] = True
+                await self._svc("vacuum", "return_to_base", {"entity_id": self._vacuum_entity})
+            _LOGGER.info("run ended by the user (%s, %s)", run.get("kind"), run.get("segments"))
+            await self._finalize_run(run, now, record=self._run_record(run), interrupted=True)
+            # The interrupted path reports "paused (someone home)"; that's wrong here.
+            self._set_status("idle", "run ended by you")
+
     async def async_reset_week(self) -> None:
         now = dt_util.now()
         week_start_day = self._opt_int(OPT_WEEK_START_DAY, DEFAULT_WEEK_START_DAY)
@@ -4361,16 +4738,10 @@ class SchedulerEngine:
         # rescue alert can BE the rescue instead of sending you off to hunt for a
         # control in the app. Tapping one fires mobile_app_notification_action,
         # which _handle_notification_action turns into a command.
-        data: dict = {}
-        if high_priority:
-            data.update({"ttl": 0, "priority": "high",
-                         "push": {"interruption-level": "time-sensitive"}})
-        if actions:
-            data["actions"] = actions
-        if image:
-            # A picture of the actual thing in its way beats any wording we could
-            # write. The mobile app resolves a relative /api/ path against HA.
-            data["image"] = image
+        # A picture of the actual thing in its way beats any wording we could
+        # write; the mobile app resolves a relative /api/ path against HA. See
+        # notify_payload for why urgent pushes no longer use ttl 0.
+        data = notify_payload.push_data(high_priority, actions, image)
         extra = {"data": data} if data else {}
         for name in self._notify_names():
             try:
@@ -4378,7 +4749,7 @@ class SchedulerEngine:
                     await self.hass.services.async_call(
                         "persistent_notification", "create",
                         {"title": title, "message": message,
-                         "notification_id": f"dreame_scheduler_{self.entry.entry_id}"},
+                         "notification_id": notify_payload.notification_id(self.entry.entry_id, title)},
                         blocking=False,
                     )
                 else:

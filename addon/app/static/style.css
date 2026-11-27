@@ -208,6 +208,9 @@ select[multiple] { min-height: 96px; }
 .room-extra .grid label > span { color: var(--muted); }
 .room-extra .grid label em { font-style: normal; opacity: .7; }
 .room-extra .grid label.wide, .room-extra .grid .wide { grid-column: 1 / -1; }
+.room-extra .mopdays { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+.room-extra .mopdays > span { flex-basis: 100%; }
+.room-extra .mopday { display: inline-flex; align-items: center; gap: 4px; }
 .room-extra select, .room-extra input { max-width: none; width: 100%; padding: 6px 8px; background: var(--card); }
 /* Extra-times editor: repeatable rows of [time] [vacuum-only] [remove]. */
 .times-editor { display: flex; flex-direction: column; gap: 6px; font-size: 12px; }

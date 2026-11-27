@@ -29,7 +29,14 @@ from . import trap_learner
 from .const import (
     CONF_PREFIX,
     CONF_VACUUM_ENTITY,
+    DEFAULT_CATCHUP_DAY,
+    DEFAULT_CATCHUP_ENABLED,
+    DEFAULT_CATCHUP_TIME,
     DEFAULT_DAILY_TIME,
+    DEFAULT_REQUIRE_AWAY,
+    DEFAULT_WINDOW_ENABLED,
+    DEFAULT_WINDOW_END,
+    DEFAULT_WINDOW_START,
     DOMAIN,
     MAX_SEGMENTS,
     OPT_CATCHUP_DAY,
@@ -205,6 +212,13 @@ def _weekday_name(d) -> str | None:
     return WEEKDAYS[i] if 0 <= i < 7 else None
 
 
+def _opt(opts: dict, key: str, default):
+    """Read an option exactly the way the engine does (SchedulerEngine._opt):
+    the default only when the key is absent, so the report can never show a
+    different setting from the one the scheduler is actually using."""
+    return opts.get(key, default)
+
+
 def _schedule(hass: HomeAssistant, engine, opts: dict, rooms_cfg: dict, now: datetime) -> dict:
     """Presence + next-run summary for the Presence card."""
     presence_home = engine._presence_home()
@@ -214,22 +228,22 @@ def _schedule(hass: HomeAssistant, engine, opts: dict, rooms_cfg: dict, now: dat
     return {
         "presence_home": presence_home,          # True / False / None (unknown)
         "presence_configured": configured,
-        "require_away": bool(opts.get(OPT_REQUIRE_AWAY)),
+        "require_away": bool(_opt(opts, OPT_REQUIRE_AWAY, DEFAULT_REQUIRE_AWAY)),
         "daily_time": daily_time,
         "next_run": nxt.isoformat() if nxt else None,
         "next_run_day": WEEKDAYS[nxt.weekday()] if nxt else None,
         "next_run_time": nxt.strftime("%H:%M") if nxt else None,
         "window": {
-            "enabled": bool(opts.get(OPT_WINDOW_ENABLED)),
-            "start": opts.get(OPT_WINDOW_START),
-            "end": opts.get(OPT_WINDOW_END),
+            "enabled": bool(_opt(opts, OPT_WINDOW_ENABLED, DEFAULT_WINDOW_ENABLED)),
+            "start": _opt(opts, OPT_WINDOW_START, DEFAULT_WINDOW_START),
+            "end": _opt(opts, OPT_WINDOW_END, DEFAULT_WINDOW_END),
         },
         "catchup": {
-            "enabled": bool(opts.get(OPT_CATCHUP_ENABLED)),
+            "enabled": bool(_opt(opts, OPT_CATCHUP_ENABLED, DEFAULT_CATCHUP_ENABLED)),
             # the native options flow stores the day as a string ("5"), the
-            # add-on as an int — accept both so the day always renders
-            "day": _weekday_name(opts.get(OPT_CATCHUP_DAY)),
-            "time": opts.get(OPT_CATCHUP_TIME),
+            # add-on as an int; accept both so the day always renders
+            "day": _weekday_name(_opt(opts, OPT_CATCHUP_DAY, DEFAULT_CATCHUP_DAY)),
+            "time": _opt(opts, OPT_CATCHUP_TIME, DEFAULT_CATCHUP_TIME),
         },
     }
 

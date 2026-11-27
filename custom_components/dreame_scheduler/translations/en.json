@@ -45,6 +45,7 @@
           "catchup_time": "Catch-up time",
           "opportunistic_catchup": "Catch up on any free (empty) day, not just the catch-up day",
           "holiday_enabled": "Pause cleaning on an extended absence (holiday)",
+          "credit_external": "Count cleans started outside the scheduler (app, voice, robot schedule)",
           "holiday_after_days": "Days away before pausing (once the house is already clean)",
           "week_start_day": "Week starts on",
           "edge_enabled": "Edge clean on a schedule (trace the wall edges)",
@@ -94,6 +95,7 @@
           "suction": "Suction (blank = default)",
           "wetness": "Mop wetness (blank = default)",
           "mop_every": "Mop every N sweeps (1 = mop every clean, 2 = every 2nd day, …)",
+          "mop_days": "Mop on these days (vacuum only on the others; overrides the line above)",
           "repeats": "Passes",
           "door_sensor": "Door sensor (optional — skip when closed)"
         }

@@ -27,6 +27,8 @@ async def async_setup_entry(
                 lambda e: e.async_run_scheduled_now(quiet=False)),
         _Button(coordinator, "reset_week", "Reset week counters", "mdi:restart",
                 lambda e: e.async_reset_week()),
+        _Button(coordinator, "end_run", "End current run", "mdi:stop-circle-outline",
+                lambda e: e.async_end_run()),
     ])
 
 
